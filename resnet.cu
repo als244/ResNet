@@ -14,6 +14,7 @@
 #define TILE_WIDTH 32
 #define BLOCK_ROWS 8
 #define CUDA_BATCH_SIZE 32
+#define MAX_SHARED_MEMORY 48000
 
 __global__ void sample_gaussian(int size, float *X, float mean, float var) {
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -55,8 +56,14 @@ __global__ void matMul(const float *M, const float *N, int m, int k, int n, floa
 		if (phase * TILE_WIDTH + thread_x < k){
 			M_tile[thread_y][thread_x] = M[row_ind * k + phase * TILE_WIDTH + thread_x];
 		}
+		else{
+			M_tile[thread_y][thread_x] = 0;
+		}
 		if (phase * TILE_WIDTH + thread_y < k){
 			N_tile[thread_y][thread_x] = N[(phase * TILE_WIDTH + thread_y) * k + col_ind];
+		}
+		else{
+			N_tile[thread_y][thread_x] = 0;
 		}
 
 		__syncthreads();
@@ -66,7 +73,7 @@ __global__ void matMul(const float *M, const float *N, int m, int k, int n, floa
 		}
 		__syncthreads();
 	}
-	out[row_ind * n + col] = val;
+	out[row_ind * n + col_ind] = val;
 }
 
 // grid has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
@@ -96,6 +103,72 @@ __global__ void transpose(const float *in, int rows, int cols, float * out) {
   }
 }
 
+// 48KB is maximum value for shared memory, passed into this kernel as third param <<< gridDim, blockDim, SHARED_MEM_BYTES >>>
+// launch grid dimensions as (OUT_SPATIAL_DIM, OUT_SPATIAL_DIM) blocks, and launch with block dim as (out_filt_rows_shared) threads
+// thus 12k floats is max for shared memory per block
+// first get as many output filter weights in shared memory as possible
+// then stream samples in batch to compute output value for each sample and output filter
+__global__ void convolution(const float * input, const float * weights, int spatial_dim, int kern_dim, int in_filt, int out_filt, int stride, int batch_size, float * out){
+
+	// will consist of (shared_out_filt_rows X (kern_dim^2 * in_filt) conv_weight matrix
+	extern __shared__ float shared_mem[];
+
+	int kernel_size = (kern_dim * kern_dim * in_filt);
+	int out_filt_phases = ceil((float) out_filt / blockDim.x);
+
+	int spatial_row_start = stride * blockIdx.x;
+	int spatial_col_start = stride * blockIdx.y;
+	int out_spatial_dim = spatial_dim / (stride * stride);
+
+	int output_filter_off = threadIdx.x;
+	int half_kernel_dim = kern_dim / 2;
+	int out_filter_start, out_filter_id, spatial_row, spatial_col;
+	float out_val, spatial_val;
+	for (int out_filt_ph = 0; out_filt_ph < out_filt_phases; out_filt_ph++){
+
+		out_filter_id = out_filt_ph * blockDim.x + threadIdx.x;
+		if (out_filer_id >= out_filt){
+			return;
+		}
+
+		// overwrite scratchpad when moving phases
+		for (int j = 0; j < kernel_size; j++){
+			shared_mem[threadIdx.x * kernel_size + j] = weights[out_filter_id * kernel_size + j];
+		}
+
+		// make sure finish overwriting before advancing
+		__syncthreads();
+
+
+		for (int sample_ind = 0; sample_ind < batch_size; sample_ind++){
+			out_val = 0;
+			for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim; row_offset++){
+				for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
+					for (int channel = 0; channel < in_filt; channel++){
+						
+						// compute spatial value
+						spatial_row = spatial_row_start + row_offset;
+						spatial_col = spatial_col_start + col_offset;
+						kernel_ind = kern_dim * in_filt * (row_offset + half_kernel_dim) + in_filt * (col_offset + half_kernel_dim) + channel;
+						if ((spatial_row < 0) || (spatial_row >= spatial_dim) || (spatial_col < 0) || (spatial_col >= spatial_dim)) {
+							spatial_val = 0;
+						}
+						else{
+							spatial_val = input[spatial_dim * spatial_dim * in_filt * sample_ind + spatial_dim * in_filt * spatial_row + in_filt * spatial_col + channel];
+						}
+
+						// multiply with conv weight
+						out_val += shared_mem[threadIdx.x * kernel_size + kernel_ind] * spatial_val;
+					}
+				}
+			}
+			out[out_spatial_dim * out_spatial_dim * out_filt * sample_ind + out_spatial_dim * out_filt * blockIdx.x + out_filt * blockIdx.y + out_filter_id] = out_val;
+		}
+
+		// make sure finished with scratchpad before moving on
+		__syncthreads();
+	}
+}
 
 // hardcoded conv kernel for initial 7x7, stride 2, 64 output filter convolutional layer...
 // launching (14, 112, BATCH_SIZE) dim blocks where each block has 112/14=8 phases to utilize shared memory. Each block will have dim (64).
