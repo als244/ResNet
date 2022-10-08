@@ -97,17 +97,18 @@ __global__ void transpose(const float *in, int rows, int cols, float * out) {
 }
 
 
-// launching (14, 112) dim blocks where each block has 112/14=8 phases to utilize shared memory. Each block will have dim (64, batch_size).
+// hardcoded conv kernel for initial 7x7, stride 2, 64 output filter convolutional layer...
+// launching (14, 112, BATCH_SIZE) dim blocks where each block has 112/14=8 phases to utilize shared memory. Each block will have dim (64).
 // Each block will contribute 16 unique spatial inds * 64 output filters * 32 Batch Size to the output of layer
 // each phase loads stride new rows into shared memory, then multiples new spatial shared_mem with conv_weights, accounting for conv weight col permuation 
-__global__ void conv_spatial224_infilt3_dim7_outfilt64_stride2(const float * input, const float * weights, float * out){
+__global__ void optimized_init_conv(const float * input, const float * weights, float * out){
 
 	__shared__ float conv_weights[64][147];
-	__shared__ float spatial_vals[147][CUDA_BATCH_SIZE];
+	__shared__ float spatial_vals[147];
 
 	// index
 	int output_filter = threadIdx.x;
-	int sample_ind = threadIdx.y;
+	int sample_ind = blockIdx.z;
 
 	// assume weights are in order of outfilter 0: [R_0,0, B_0,0, G_0,0, R_0,1, G_0,1, B_0,1....R_6,6, G_6,6, B_6,6], outfilter 1: [...], ...., outfilter 63: [...]
 	for (int kernel_ind = 0; kernel_ind < 147; kernel_ind++){
@@ -126,17 +127,17 @@ __global__ void conv_spatial224_infilt3_dim7_outfilt64_stride2(const float * inp
 				spatial_col = spatial_col_start + col_offset;
 				kernel_ind = 7 * 3 * (row_offset + half_kernel_dim) + 3 * (col_offset + half_kernel_dim) + channel;
 				if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
-					spatial_vals[kernel_ind][sample_ind] = 0;
+					spatial_vals[kernel_ind] = 0;
 				}
 				else{
-					spatial_vals[kernel_ind][sample_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
+					spatial_vals[kernel_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
 				}
 			}
 		}
 	}
 
 	__syncthreads();
-	
+
 	float val = 0;
 	int circular_row = 0;
 	int out_spatial_row = (112 / blockDim.x) * blockIdx.x;
@@ -151,7 +152,7 @@ __global__ void conv_spatial224_infilt3_dim7_outfilt64_stride2(const float * inp
 			for (int kern_col = 0; kern_col < 7; kern_col++){
 				for (int ch = 0; ch < 3; ch++){
 					circular_row = (kern_row + 2 * phase) % 7;
-					val += conv_weights[output_filter][7 * 3 * kern_row + 3 * kern_col + ch] * spatial_vals[7 * 3 * circular_row + 3 * kern_col + ch][sample_ind];
+					val += conv_weights[output_filter][7 * 3 * kern_row + 3 * kern_col + ch] * spatial_vals[7 * 3 * circular_row + 3 * kern_col + ch];
 				}
 			}
 		}
