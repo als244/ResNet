@@ -13,6 +13,7 @@
 #define MAX_THREAD_PER_BLOCK 1024
 #define TILE_WIDTH 32
 #define BLOCK_ROWS 8
+#define CUDA_BATCH_SIZE 32
 
 __global__ void sample_gaussian(int size, float *X, float mean, float var) {
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -93,6 +94,93 @@ __global__ void transpose(const float *in, int rows, int cols, float * out) {
   for (int j = 0; j < col_boundary; j += BLOCK_ROWS){
      out[(col_ind+j)*rows + row_ind] = tile[threadIdx.x][threadIdx.y + j];
   }
+}
+
+
+// launching (14, 112) dim blocks where each block has 112/14=8 phases to utilize shared memory. Each block will have dim (64, batch_size).
+// Each block will contribute 16 unique spatial inds * 64 output filters * 32 Batch Size to the output of layer
+// each phase loads stride new rows into shared memory, then multiples new spatial shared_mem with conv_weights, accounting for conv weight col permuation 
+__global__ void conv_spatial224_infilt3_dim7_outfilt64_stride2(const float * input, const float * weights, float * out){
+
+	__shared__ float conv_weights[64][147];
+	__shared__ float spatial_vals[147][CUDA_BATCH_SIZE];
+
+	// index
+	int output_filter = threadIdx.x;
+	int sample_ind = threadIdx.y;
+
+	// assume weights are in order of outfilter 0: [R_0,0, B_0,0, G_0,0, R_0,1, G_0,1, B_0,1....R_6,6, G_6,6, B_6,6], outfilter 1: [...], ...., outfilter 63: [...]
+	for (int kernel_ind = 0; kernel_ind < 147; kernel_ind++){
+		conv_weights[output_filter][kernel_ind] = weights[output_filter * 147 + kernel_ind];
+	}
+
+	// 2 * vals because stride of 2
+	int spatial_row_start = (224 / blockDim.x) * blockIdx.x;
+	int spatial_col_start = 2 * blockIdx.y;
+	int spatial_row, spatial_col, kernel_ind;
+	int half_kernel_dim = 3;
+	for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim;  row_offset++){
+		for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
+			for (int channel = 0; channel < 3; channel++){
+				spatial_row = spatial_row_start + row_offset;
+				spatial_col = spatial_col_start + col_offset;
+				kernel_ind = 7 * 3 * (row_offset + half_kernel_dim) + 3 * (col_offset + half_kernel_dim) + channel;
+				if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
+					spatial_vals[kernel_ind][sample_ind] = 0;
+				}
+				else{
+					spatial_vals[kernel_ind][sample_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
+				}
+			}
+		}
+	}
+
+	__syncthreads();
+	
+	float val = 0;
+	int circular_row = 0;
+	int out_spatial_row = (112 / blockDim.x) * blockIdx.x;
+	int out_spatial_col = blockIdx.y;
+	int new_top_row = 0;
+	for (int phase = 0; phase < 8; phase++){
+
+		// compute matrix mult to get (output_filt x batch_size) result. this is for a single receptive field across depth and batches
+		// iterative over phases to get multiple receptive fields and exploit spatial locality
+		val = 0;
+		for (int kern_row = 0; kern_row < 7; kern_row++){
+			for (int kern_col = 0; kern_col < 7; kern_col++){
+				for (int ch = 0; ch < 3; ch++){
+					circular_row = (kern_row + 2 * phase) % 7;
+					val += conv_weights[output_filter][7 * 3 * kern_row + 3 * kern_col + ch] * spatial_vals[7 * 3 * circular_row + 3 * kern_col + ch][sample_ind];
+				}
+			}
+		}
+
+		out[112 * 112 * 64 * sample_ind + 112 * 64 * out_spatial_row + 64 * out_spatial_col + output_filter] = val;
+
+		__syncthreads();
+
+		int row_to_replace, replace_ind;
+		for (int i = 1; i <= 2; i++){
+			row_to_replace = (2 * phase) + i % 7;
+			spatial_row = spatial_row_start + half_kernel_dim + 2 * phase + i; 
+			for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
+				for (int channel = 0; channel < 3; channel++){
+					spatial_col = spatial_col_start + col_offset;
+					replace_ind = 7 * 3 * row_to_replace + 3 * (col_offset + half_kernel_dim) + channel;
+					if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
+						spatial_vals[replace_ind][sample_ind] = 0;
+					}
+					else{
+						spatial_vals[replace_ind][sample_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
+					}
+				}
+			}
+		}
+		out_spatial_row++;
+
+		__syncthreads();
+	}
 }
 
 
@@ -475,13 +563,13 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 	return trainer;
 }
 
-Batch * init_general_batch(int n_images, int image_size){
+Batch * init_general_batch(int n_images, int image_size, int image_dim){
 	Batch * batch = malloc(sizeof(Batch));
 
 	batch -> n_images = n_images;
 	// in resnet-50 will be 224 * 224 * 3
 	batch -> image_size = image_size;
-
+	batch -> image_dim = image_dim;
 	// load batch by first brining into cpu
 	batch -> images_cpu = malloc(n_images * image_size * sizeof(uint8_t));
 	batch -> images_float_cpu = malloc(n_images * image_size * sizeof(float));
@@ -532,6 +620,7 @@ void * load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 
 	// array is linear format where each sequence of image_size [0, image_size) is image 1, then [image_size, 2 * image_size) has image 2
 	// each image is also linearized where ording of pixels is - 0, 0: (R, G, B) then 0, 1: (R,G,B), ...
+
 	for (int pixel = 0; pixel < total_pixels; pixel++){
 		images_float_cpu[pixel] = (float) images_cpu[pixel];
 	}
@@ -739,11 +828,5 @@ int main(int argc, char *argv[]) {
 		(trainer -> accuracy_per_epoch)[epoch] = epoch_accuracy;
 
 	}
-
-
-
-
-
-
 
 }
