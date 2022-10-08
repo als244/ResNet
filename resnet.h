@@ -155,6 +155,7 @@ typedef struct {
 } Train_ResNet;
 
 typedef struct{
+	int image_dim;
 	int image_size;
 	int n_images;
 	uint8_t * images_cpu;
