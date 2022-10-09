@@ -15,6 +15,7 @@
 #define BLOCK_ROWS 8
 #define CUDA_BATCH_SIZE 32
 #define MAX_SHARED_MEMORY 48000
+#define MAX_SHARED_MEM_FLOATS 12000
 
 __global__ void sample_gaussian(int size, float *X, float mean, float var) {
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -108,7 +109,7 @@ __global__ void transpose(const float *in, int rows, int cols, float * out) {
 // thus 12k floats is max for shared memory per block
 // first get as many output filter weights in shared memory as possible, but have separate blocks working on different chunks (OUT_FILTER_CHUNK * out_filt_rows_shared = out_filt)
 // then stream samples in batch to compute output value for each sample and output filter. Eac sub_batch will have batch_size / dim(sub_batch) samples to go over
-__global__ void convolution(const float * input, const float * weights, int spatial_dim, int kern_dim, int in_filt, int out_filt, int stride, int batch_size, float * out){
+__global__ void doConvolution(const float * input, const float * weights, const float * biases, int spatial_dim, int kern_dim, int in_filt, int out_filt, int stride, int batch_size, float * out){
 
 	// will consist of (shared_out_filt_rows X (kern_dim^2 * in_filt) conv_weight matrix
 	extern __shared__ float shared_mem[];
@@ -158,7 +159,61 @@ __global__ void convolution(const float * input, const float * weights, int spat
 				}
 			}
 		}
-		out[out_spatial_dim * out_spatial_dim * out_filt * sample_ind + out_spatial_dim * out_filt * blockIdx.x + out_filt * blockIdx.y + out_filter_id] = out_val;
+		out[out_spatial_dim * out_spatial_dim * out_filt * sample_ind + out_spatial_dim * out_filt * blockIdx.x + out_filt * blockIdx.y + out_filter_id] = out_val + biases[out_filter_id];
+	}
+}
+
+// iterating over each filter separately
+// launch with (OUTFILTERS) grid dim and thread dim of 1 (could easily parallelize menas + vars, with reduction, but save for later..)
+// could also use shared memory here if want to be faster
+// input is the output of convolution
+__global__ void doBatchNormAndActivate(const float * input, const float * gamma, const float * beta,
+								int spatial_dim, int filters, int batch_size, float eps, float * means, float * vars, float * normalized_temp, float * normalized, float * activated){
+
+	int filter_id = blockIdx.x;
+	if (filter_id >= filters){
+		return;
+	}
+
+	float mean, var;
+	float sum = 0;
+	for (int s = 0; s < batch_size; s++){
+		for (int i = 0; i < spatial_dim; i++){
+			for (int j = 0; j < spatial_dim; j++){
+				sum += input[spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id];
+			}
+		}
+	}
+
+	mean = sum / (batch_size * spatial_dim * spatial_dim);
+	means[filter_id] = mean;
+
+	float var_sum = 0;
+	int inp_index;
+	for (int s = 0; s < batch_size; s++){
+		for (int i = 0; i < spatial_dim; i++){
+			for (int j = 0; j < spatial_dim; j++){
+				inp_index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
+				var_sum += (input[inp_index] - mean) * (input[inp_index] - mean);
+			}
+		}
+	}
+
+	var = var_sum / (batch_size * spatial_dim * spatial_dim);
+	vars[filter_id] = var;
+
+	float normalized_temp_val, normalized_val;
+	for (int s = 0; s < batch_size; s++){
+		for (int i = 0; i < spatial_dim; i++){
+			for (int j = 0; j < spatial_dim; j++){
+				inp_index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
+				normalized_temp_val = (input[inp_index] - mean) / sqrtf(var + eps);
+				normalized_temp[inp_index] = normalized_temp_val;
+				normalized_val = gamma[filter_id] * normalized_temp_val + beta[normalized_temp_val];
+				normalized[inp_index] = normalized_val;
+				acitvated[inp_index] = fmaxf(normalized_val, 0); 
+			}
+		}
 	}
 }
 
@@ -913,6 +968,54 @@ void text_file_to_buffer(void * buffer, char * filename, const char * type){
     	free(line);
     }
 }
+
+
+
+void forward_pass(Train_ResNet * trainer){
+
+	Dims * dims = trainer -> model -> dims;
+
+	float eps = trainer -> eps;
+	int batch_size = trainer -> batch_size;
+
+	float * input = trainer -> cur_batch -> images;
+	float * first_conv = trainer -> model -> params -> init_conv_layer;
+	float * first_conv_bias = trainer -> model -> params -> bias_init_conv;
+	float * first_conv_output = trainer -> forward_buffer -> activations -> init_conv_applied;
+	// first apply the convolutions
+	// launch grid dimensions as (OUT_SPATIAL_DIM, OUT_SPATIAL_DIM, OUT_FILTER_CHUNK) blocks, and launch with block dim as (out_filt_rows_shared, sub_batch) threads
+	
+	// 3 colors
+	int init_in_filters = 3;
+	int init_spatial_dim = dims -> input;
+	int init_kernel_dim = dims -> init_kernel_dim;
+	int init_out_filters = dims -> init_conv_filters;
+	int init_stride = dims -> init_conv_stride;
+
+	int outfilter_row_size =  init_kernel_dim * init_kernel_dim * init_in_filters;
+	int max_outfilter_rows = MAX_SHARED_MEM_FLOATS / outfilter_row_size;
+	int outfilter_chunks = ceil((float) init_out_filters / max_outfilter_rows);
+	int shared_mem_size = max_outfilter_rows * outfilter_row_size;
+	int init_out_spatial_dim = init_spatial_dim / init_stride;
+	dim3 gridDimInitConv(out_spatial_dim, out_spatial_dim, outfilter_chunks);
+	int max_subatch_size = MAX_THREAD_PER_BLOCK / max_outfilter_rows;
+	dim3 blockDimInitConv(max_outfilter_rows, max_subatch_size); 
+	
+	// apply convolution filters and add biases
+	doConvolution <<< gridDimInitConv, blockDimInitConv, shared_mem_size >>> (input, first_conv, first_conv_bias, init_spatial_dim, init_kernel_dim, init_in_filters, init_out_filters, init_stride, batch_size, first_conv_output);
+
+	float * init_gamma = trainer -> model -> params -> norm_init_conv -> gamma;
+	float * init_beta = trainer -> model -> params -> norm_init_conv -> beta;
+	float * init_means = trainer -> forward_buffer -> activations -> norm_init_conv -> means;
+	float * init_vars = trainer -> forward_buffer -> activations -> norm_init_conv -> vars;
+	float * init_normalized_temp = trainer -> forward_buffer -> activations -> norm_init_conv -> normalized_temp;
+	float * init_normalized = trainer -> forward_buffer -> activations -> norm_init_conv -> normalized;
+	float * init_activated = trainer -> forward_buffer -> activations -> init_conv_activated;
+
+	doBatchNormAndActivate <<< init_out_filters, 1 >>> (first_conv_output, init_gamma, init_beta, init_out_spatial_dim, init_out_filters, batch_size, eps, init_means, init_vars, init_normalized_temp, init_normalized, init_activated);
+}
+
+
 
 int main(int argc, char *argv[]) {
 
