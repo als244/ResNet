@@ -589,12 +589,24 @@ Activation_ConvBlock * init_activation_convblock(ConvBlock * conv_block, int bat
 	cudaMalloc(&post_reduced, post_reduced_size * sizeof(float));
 	activation_conv_block -> post_reduced_size = post_reduced;
 
+	float * depth_reduced_means, depth_reduced_vars;
+	cudaMalloc(&depth_reduced_means, reduced_depth * sizeof(float));
+	cudaMalloc(&depth_reduced_vars, reduced_depth * sizeof(float));
+	activation_conv_block -> depth_reduced_means = depth_reduced_means;
+	activation_conv_block -> depth_reduced_vars = depth_reduced_vars;
+
 	cudaMalloc(&norm_post_reduced, post_reduced_size * sizeof(float));
 	activation_conv_block -> norm_post_reduced = norm_post_reduced;
 
 	post_spatial_size = reduced_depth * incoming_spatial_dim * incoming_spatial_dim / (stride * stride) * batch_size;
 	cudaMalloc(&post_spatial, post_spatial_size * sizeof(float));
 	activation_conv_block -> post_spatial = post_spatial;
+
+	float * post_spatial_means, post_spatial_vars;
+	cudaMalloc(&post_spatial_means, reduced_depth * sizeof(float));
+	cudaMalloc(&post_spatial_vars, reduced_depth * sizeof(float));
+	activation_conv_block -> post_spatial_means = post_spatial_means;
+	activation_conv_block -> post_spatial_vars = post_spatial_vars;
 
 	cudaMalloc(&norm_post_spatial, post_spatial_size * sizeof(float));
 	activation_conv_block -> norm_post_spatial = norm_post_spatial;
@@ -603,6 +615,13 @@ Activation_ConvBlock * init_activation_convblock(ConvBlock * conv_block, int bat
 	
 	cudaMalloc(&post_expanded, output_size * sizeof(float));
 	activation_conv_block -> post_expanded = post_expanded;
+
+	float * post_expanded_means, post_expanded_vars;
+	cudaMalloc(&post_expanded_means, expanded_depth * sizeof(float));
+	cudaMalloc(&post_expanded_vars, expanded_depth * sizeof(float));
+	activation_conv_block -> post_expanded_means = post_expanded_means;
+	activation_conv_block -> post_expanded_vars = post_expanded_vars;
+
 
 	cudaMalloc(&norm_post_expanded, output_size * sizeof(float));
 	activation_conv_block -> norm_post_expanded = norm_post_expanded;
@@ -634,12 +653,24 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 	cudaMalloc(&init_conv_applied, init_conv_applied_size * sizeof(float));
 	activations -> init_conv_applied = init_conv_applied;
 
+	float * init_conv_means, init_conv_vars;
+	cudaMalloc(&init_conv_means, init_conv_filters * sizeof(float));
+	cudaMalloc(&init_conv_vars, init_conv_filters * sizeof(float));
+	activations -> init_conv_means = init_conv_means;
+	activations -> init_conv_vars = init_conv_vars;
+
+
 	float * norm_init_conv_activations;
 	cudaMalloc(&norm_init_conv_activations, init_conv_applied_size * sizeof(float));
 	activations -> norm_init_conv_activations = norm_init_conv_activations;
 
-	float *init_convblock_input;
 	int init_convblock_input_size = init_conv_filters * input_dim * input_dim / (init_stride * init_stride) / (maxpool_stride * maxpool_stride) * batch_size;
+
+	int * max_inds;
+	cudaMalloc(&max_inds, init_convblock_input_size * sizeof(int));
+	activations -> max_inds = max_inds;
+
+	float *init_convblock_input;
 	cudaMalloc(&init_convblock_input, init_convblock_input_size * sizeof(float));
 	activations -> init_convblock_input = init_convblock_input;
 
@@ -674,17 +705,6 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 Forward_Buffer * init_forward_buffer(Dims * dims, ConvBlock ** conv_blocks, int batch_size){
 
 	Forward_Buffer * forward_buffer = malloc(sizeof(Forward_Buffer));
-
-	int input_dim = dims -> input;
-	int init_conv_filters = dims -> init_conv_filters;
-	int init_conv_stride = dims -> init_conv_stride;
-	int maxpool_stride = dims -> init_maxpool_stride;
-
-	int init_convblock_input_size = init_conv_filters * input_dim * input_dim / (init_stride * init_stride) / (maxpool_stride * maxpool_stride) * batch_size;
-
-	int * max_inds;
-	cudaMalloc(&max_inds, init_convblock_input_size * sizeof(int));
-	forward_buffer -> max_inds = max_inds;
 
 	forward_buffer -> activations = init_activations(dims, conv_blocks, batch_size);
 
