@@ -46,9 +46,15 @@ typedef struct {
 	// kernel weights for initial 1x1 step
 	float * depth_reduction;
 	// kernel weights for 3x3 step
+	float * bias_depth_reduction;
+	BatchNorm * norm_depth_reduction;
 	float * spatial;
+	float * bias_spatial;
+	BatchNorm * norm_spatial;
 	// kernel weights for output 1x1 step 
 	float * depth_expansion;
+	float * bias_depth_expansion;
+	BatchNorm * norm_depth_expansion;
 	// need a projection is input dims != output dims
 	// contains pointers to convluations transforming input to output to add as residual
 	// occurs between stages:
@@ -64,8 +70,17 @@ typedef struct {
 } ConvBlock;
 
 typedef struct{
+	int spatial_dim;
+	int depth;
+	float * gamma;
+	float * beta;
+} BatchNorm;
+
+typedef struct{
 	// initial 7x7 kernels
 	float * init_conv_layer;
+	float * bias_init_conv;
+	BatchNorm * norm_init_conv;
 	// contains pointers to collection of bottleneck block triples
 	ConvBlock ** conv_blocks;
 	float * fully_connected;
@@ -83,12 +98,29 @@ typedef struct {
 	int expanded_depth;
 	// stride 2 for transition between stages
 	int stride;
-	// applying first layer in block to output of previous block, then ReLU
+	// applying first layer in block to output of previous block and adding bias
 	float *depth_reduced;
-	// applying second layer in block to depth_reduced, then ReLU
+	// storing values of means per channel that will be used in back-prop
+	float *depth_reduced_means;
+	// caching values of vars per channel
+	float *depth_reduced_vars;
+	// applying batch norm, then reLU
+	float *norm_post_reduced;
+
+	// applying second layer in block to depth_reduced and adding bias
 	float *post_spatial;
-	// applying last layer in block to post_sptial, no activation until output
+	float *post_spatial_means;
+	float *post_spatial_vars;
+	// applying batch norm, then reLU
+	float *norm_post_spatial;
+	// applying last layer in block to post_spatial and adding bias
+
 	float *post_expanded;
+	float *post_expanded_means;
+	float *post_expanded_vars;
+	// applying batch norm, no activation until output
+	float *norm_post_expanded;
+
 	// if input dim of block != output dim of block, need to apply a transform 
 	// (otherwise null which implies identity of output of previous block)
 	float *transformed_residual;
@@ -98,8 +130,15 @@ typedef struct {
 } Activation_ConvBlock;
 
 typedef struct{
-	// activiations after initial 7x7 kernel, then maxpool
-	float * init_conv_activation;
+	// after initial 7x7 kernel and adding bias
+	float * init_conv_applied;
+	// storing means+vars of each filter to be used in back-prop
+	float * init_conv_means;
+	float * init_conv_vars;
+	// after applying batch norm to init_conv and activating with reLU
+	float * norm_init_conv_activations;
+	// saving max inds for backprop of maxpool layer in beginning
+	int * max_inds;
 	// occurs after max pool of init conv activations
 	float * init_convblock_input;
 	Activation_ConvBlock ** activation_conv_blocks;
@@ -117,8 +156,6 @@ typedef struct{
 
 
 typedef struct{
-	// saving max inds for backprop of maxpool layer in beginning
-	int * max_inds;
 	Activations * activations;
 	// after applying softmax to linear_output
 	float * pred;
