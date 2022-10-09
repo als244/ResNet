@@ -99,44 +99,40 @@ typedef struct {
 	// stride 2 for transition between stages
 	int stride;
 	// applying first layer in block to output of previous block and adding bias
-	float *depth_reduced;
-	// storing values of means per channel that will be used in back-prop
-	float *depth_reduced_means;
-	// caching values of vars per channel
-	float *depth_reduced_vars;
-	// applying batch norm, then reLU
-	float *norm_post_reduced;
+	float *post_reduced;
+	Cache_BatchNorm * norm_post_reduced;
+	float *post_reduced_activated;
 
 	// applying second layer in block to depth_reduced and adding bias
 	float *post_spatial;
-	float *post_spatial_means;
-	float *post_spatial_vars;
-	// applying batch norm, then reLU
-	float *norm_post_spatial;
-	// applying last layer in block to post_spatial and adding bias
+	Cache_BatchNorm * norm_post_spatial;
+	float *post_spatial_activated;
 
 	float *post_expanded;
-	float *post_expanded_means;
-	float *post_expanded_vars;
-	// applying batch norm, no activation until output
-	float *norm_post_expanded;
+	Cache_BatchNorm * norm_post_expanded;
 
 	// if input dim of block != output dim of block, need to apply a transform 
 	// (otherwise null which implies identity of output of previous block)
 	float *transformed_residual;
 	// occurs after adding last layer to residual connection
-	// adding transformed_residual (or equivalently input of block == output of prev block) to post_expanded, then ReLU
+	// adding transformed_residual (or equivalently input of block == output of prev block) to norm_post_expanded -> normalized, then ReLU
 	float *output;
 } Activation_ConvBlock;
 
 typedef struct{
+	int input_size;
+	int feature_size;
+	float * means;
+	float * vars;
+	float * normalized_temp;
+	float * normalized;
+} Cache_BatchNorm;
+
+typedef struct{
 	// after initial 7x7 kernel and adding bias
 	float * init_conv_applied;
-	// storing means+vars of each filter to be used in back-prop
-	float * init_conv_means;
-	float * init_conv_vars;
-	// after applying batch norm to init_conv and activating with reLU
-	float * norm_init_conv_activations;
+	Cache_BatchNorm * norm_init_conv;
+	float * init_conv_activated;
 	// saving max inds for backprop of maxpool layer in beginning
 	int * max_inds;
 	// occurs after max pool of init conv activations
