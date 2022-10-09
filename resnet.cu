@@ -217,6 +217,49 @@ __global__ void doBatchNormAndActivate(const float * input, const float * gamma,
 	}
 }
 
+// assume grid launch of (SPATIAL_OUT_DIM, SPATIAL_OUT_DIM) and block dim of (FILTERS)
+// could parallelize over batches as well, but probably ok. 
+// *runs into issues if #filters greater than threads per block
+__global__ void doMaxPool(const float * input, int kern_dim, int stride, int batch_size, float * max_inds, float * out){
+
+	int filter_id = threadIdx.x;
+
+	// know this because of launch specification
+	int filters = blockDim.x;
+	int in_spatial_dim = stride * gridDim.x;
+	int out_spatial_dim = gridDim.x;
+
+	int spatial_row_start = stride * blockIdx.x;
+	int spatial_col_start = stride * blockIdx.y;
+
+	int half_kernel_dim = kern_dim / 2;
+
+	float max_val, inp_val;
+	int spatial_row, spatial_col, max_ind, inp_ind, out_ind;
+	for (int s = 0; s < batch_size; s++){
+		max_val = -1;
+		max_ind = -1;
+		for (int row_off = -half_kernel_dim; row_off <= half_kernel_dim; row_off++){
+			for (int col_off = -half_kernel_dim; col_off <= half_kernel_dim; col_off++){
+				spatial_row = spatial_row_start + row_off;
+				spatial_col = spatial_col_start + col_off;
+				if ((spatial_row < 0) || (spatial_row >= in_spatial_dim) || (spatial_col < 0) || (spatial_col >= in_spatial_dim)){
+					continue;
+				}
+				inp_ind = in_spatial_dim * in_spatial_dim * filters * s + in_spatial_dim * filters * spatial_row + filters * spatial_col + filter_id;
+				inp_val = input[inp_ind];
+				if (inp_val > max_val){
+					max_val = inp_val;
+					max_ind = inp_ind;
+				}
+			}
+		}
+		out_ind = out_spatial_dim * out_spatial_dim * filters * s + out_spatial_dim * filters * blockIdx.x + filters * blockIdx.y + filter_id;
+		max_inds[out_ind] = max_ind;
+		out[out_ind] = max_val;
+	}
+}
+
 // hardcoded conv kernel for initial 7x7, stride 2, 64 output filter convolutional layer...
 // launching (14, 112, BATCH_SIZE) dim blocks where each block has 112/14=8 phases to utilize shared memory. Each block will have dim (64).
 // Each block will contribute 16 unique spatial inds * 64 output filters * 32 Batch Size to the output of layer
@@ -1013,6 +1056,16 @@ void forward_pass(Train_ResNet * trainer){
 	float * init_activated = trainer -> forward_buffer -> activations -> init_conv_activated;
 
 	doBatchNormAndActivate <<< init_out_filters, 1 >>> (first_conv_output, init_gamma, init_beta, init_out_spatial_dim, init_out_filters, batch_size, eps, init_means, init_vars, init_normalized_temp, init_normalized, init_activated);
+
+	int init_maxpool_dim = dims -> init_maxpool_dim;
+	int init_maxpool_stride = dims -> init_maxpool_stride;
+	int init_maxpool_out_dim = init_out_spatial_dim / init_maxpool_stride;
+	float * init_convblock_input = trainer -> forward_buffer -> activations -> init_convblock_input;
+	float * max_ind_buff = trainer -> forward_buffer -> activations -> max_inds;
+	doMaxPool <<< (init_maxpool_out_dim, init_maxpool_out_dim) , init_out_filters >>> (init_activated, init_maxpool_dim, init_maxpool_stride, batch_size, max_ind_buff, init_convblock_input);
+
+
+	/* NOW CAN MOVE ONTO TO CONV_BLOCK LAYERS! */
 }
 
 
