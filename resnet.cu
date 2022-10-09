@@ -284,7 +284,32 @@ Dims * init_dimensions(int input, int init_kernel_dim, int init_conv_filters, in
 	dims -> output = output;
 }
 
-ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int reduced_depth, int expanded_depth, int stride, bool is_zero){
+BatchNorm * init_batch_norm(int spatial_dim, int depth, bool is_zero){
+	BatchNorm * batch_norm = malloc(sizeof(BatchNorm));
+
+	batch_norm -> spatial_dim = spatial_dim;
+	batch_norm -> depth = depth;
+	batch_norm -> alpha = alpha;
+
+	float * gamma, * beta;
+
+	cudaMalloc(&gamma, depth * sizeof(float));
+	cudaMemset(gamma, 0, depth * sizeof(float));
+	if (!is_zero){
+		cudaMemset(gamma, 1, depth * sizeof(float));
+	}
+
+	cudaMalloc(&beta, depth * sizeof(float));
+	cudaMemset(beta, 0, depth * sizeof(float));
+
+	batch_norm -> gamma = gamma;
+	batch_norm -> beta = beta;
+
+	return batch_norm;
+
+}
+
+ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int reduced_depth, int expanded_depth, int stride, float ewma_alpha, bool is_zero){
 	ConvBlock * conv_block = malloc(sizeof(ConvBlock));
 	conv_block -> incoming_filters = incoming_filters;
 	conv_block -> incoming_spatial_dim = incoming_spatial_dim;
@@ -293,8 +318,12 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	conv_block -> stride = stride;
 
 	float * depth_reduction, *spatial, *depth_expansion;
+	float * bias_depth_reduction, * bias_spatial, * bias_depth_expansion;
 	int depth_reduction_size, spatial_size, depth_expansion_size;
+	int bias_depth_reduction_size, bias_spatial_size, bias_depth_expansion_size;
 	float depth_reduction_fan_in, spatial_fan_in, depth_expansion_fan_in;
+
+	BatchNorm *norm_depth_reduction, *norm_spatial, *norm_depth_expansion;
 
 	depth_reduction_size = incoming_filters * reduced_depth;
 	depth_reduction_fan_in = incoming_spatial_dim * incoming_spatial_dim * incoming_filters;
@@ -304,6 +333,13 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 		sample_gaussian <<< SM_COUNT, ceil((float) (depth_reduction_size) / SM_COUNT) >>> (depth_reduction_size, depth_reduction, 0, 2.0 / depth_reduction_fan_in);
 	}
 
+	bias_depth_reduction_size = reduced_depth;
+	cudaMalloc(&bias_depth_reduction, bias_depth_reduction_size * sizeof(float));
+	cudaMemset(bias_depth_reduction, 0, bias_depth_reduction_size * sizeof(float));
+
+	norm_depth_reduction = init_batch_norm(incoming_spatial_dim, reduced_depth, is_zero);
+
+
 	spatial_size = reduced_depth * reduced_depth * 3 * 3;
 	spatial_fan_in = incoming_spatial_dim * incoming_spatial_dim * reduced_depth;
 	cudaMalloc(&spatial, spatial_size * sizeof(float));
@@ -312,10 +348,15 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 		sample_gaussian <<< SM_COUNT, ceil((float) (spatial_size) / SM_COUNT) >>> (spatial_size, spatial, 0, 2.0 / spatial_fan_in);
 	}
 
+	bias_spatial_size = reduced_depth;
+	cudaMalloc(&bias_spatial, bias_spatial_size * sizeof(float));
+	cudaMemset(bias_spatial, 0, bias_spatial_size * sizeof(float));
+
 	// the spatial decrease happens at middle 3x3 layer, to the last layer of stride block will receive lower spatial dim input
 	if (stride == 2){
 		incoming_spatial_dim /= 2;
 	}
+	norm_spatial = init_batch_norm(incoming_spatial_dim, reduced_depth, is_zero);
 
 	depth_expansion_size = expanded_depth * reduced_depth;
 	depth_expansion_fan_in = incoming_spatial_dim * incoming_spatial_dim * reduced_depth;
@@ -325,9 +366,25 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 		sample_gaussian <<< SM_COUNT, ceil((float) (depth_expansion_size) / SM_COUNT) >>> (depth_expansion_size, depth_expansion, 0, 2.0 / depth_expansion_fan_in);
 	}
 
+	bias_depth_expansion_size = expanded_depth;
+	cudaMalloc(&bias_depth_expansion, bias_depth_expansion_size * sizeof(float));
+	cudaMemset(bias_depth_expansion, 0, bias_depth_expansion_size * sizeof(float));
+
+	norm_depth_expansion = init_batch_norm(incoming_spatial_dim, expanded_depth, is_zero);
+
+
 	conv_block -> depth_reduction = depth_reduction;
+	conv_block -> bias_depth_reduction = bias_depth_reduction;
+	conv_block -> norm_depth_reduction = norm_depth_reduction;
+
 	conv_block -> spatial = spatial;
+	conv_block -> bias_spatial = bias_spatial;
+	conv_block -> norm_spatial = norm_spatial;
+
+
 	conv_block -> depth_expansion = depth_expansion;
+	conv_block -> bias_depth_expansion = bias_depth_expansion;
+	conv_block -> norm_depth_expansion = norm_depth_expansion;
 
 
 	float * projection;
@@ -362,15 +419,15 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 	int output_dim = model_dims -> output;
 
 	// init array to hold pointers to weights
-	// 3 weight arrays per conv block + inital + fully connected + 4 projections
+	// 3 * 4 weight arrays per conv block (weights, biases, batch_mean, batch_var per layer in block) + 4 * inital + fully connected + 4 projections
 	// ignoring biases + batch norm weights for now...
-	int n_locations = 6 + 3 * n_conv_blocks;
+	int n_locations = 9 + 12 * n_conv_blocks;
 	params -> n_locations = n_locations;
 
 	float ** locations = malloc(n_locations * sizeof(float *));
 	int * sizes = malloc(n_locations * sizeof(int));
 	// tracking location ind as we start allocating...
-	int loc_ind = 0
+	
 
 
 	// init first 7 * 7 conv_layer
@@ -383,9 +440,33 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 		sample_gaussian <<< SM_COUNT, ceil((float) (init_conv_size) / SM_COUNT) >>> (init_conv_size, init_conv_layer, 0, 2.0 / init_conv_fan_in);
 	}
 	params -> init_conv_layer = init_conv_layer;
+
+	int loc_ind = 0;
 	locations[loc_ind] = init_conv_layer;
 	sizes[loc_ind] = init_kernel_dim * init_kernel_dim * init_conv_filters;
 	loc_ind++;
+
+	float * bias_init_conv;
+	cudaMalloc(&bias_init_conv, init_conv_filters * sizeof(float));
+	cudaMemset(bias_init_conv, 0, init_conv_filters * sizeof(float));
+
+	params -> bias_init_conv = bias_init_conv;
+
+	locations[loc_ind] = bias_init_conv;
+	sizes[loc_ind] = init_conv_filters;
+	loc_ind++;
+
+	BatchNorm * norm_init_conv = init_batch_norm(input_dim, init_conv_filters, is_zero);
+	params -> norm_init_conv = norm_init_conv;
+
+	locations[loc_ind] = norm_init_conv -> gamma;
+	sizes[loc_ind] = init_conv_filters;
+	loc_ind++;
+
+	locations[loc_ind] = norm_init_conv -> beta;
+	sizes[loc_ind] = init_conv_filters;
+	loc_ind++;
+	
 
 	// init conv blocks
 	ConvBlock ** conv_blocks = malloc(n_conv_blocks * sizeof(ConvBlock *));
@@ -408,12 +489,43 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 		locations[loc_ind] = conv_blocks[i] -> depth_reduction;
 		sizes[loc_ind] = incoming_filters * reduced_depth;
 		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> bias_depth_reduction;
+		sizes[loc_ind] = reduced_depth;
+		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> norm_depth_reduction -> gamma;
+		sizes[loc_ind] = reduced_depth;
+		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> norm_depth_reduction -> beta;
+		sizes[loc_ind] = reduced_depth;
+		loc_ind++;
+
 		locations[loc_ind] = conv_blocks[i] -> spatial;
 		sizes[loc_ind] = reduced_depth * reduced_depth * 3 * 3;
 		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> bias_spatial;
+		sizes[loc_ind] = reduced_depth;
+		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> norm_spatial -> gamma;
+		sizes[loc_ind] = reduced_depth;
+		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> norm_spatial -> beta;
+		sizes[loc_ind] = reduced_depth;
+		loc_ind++;
+
 		locations[loc_ind] = conv_blocks[i] -> depth_expansion;
 		sizes[loc_ind] = expanded_depth * reduced_depth;
 		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> bias_depth_expansion;
+		sizes[loc_ind] = expanded_depth;
+		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> norm_depth_expansion -> gamma;
+		sizes[loc_ind] = expanded_depth;
+		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> norm_depth_expansion -> beta;
+		sizes[loc_ind] = expanded_depth;
+		loc_ind++;
+
+
 		// if the block needed a projection to make input dim = output dim
 		if (conv_blocks[i] -> projection){
 			locations[loc_ind] = conv_blocks[i] -> projection;
@@ -470,20 +582,30 @@ Activation_ConvBlock * init_activation_convblock(ConvBlock * conv_block, int bat
 	activation_conv_block -> stride = conv_block -> stride;
 
 	float * post_reduced, *post_spatial, *post_expanded, *transformed_residual, *output;
+	float * norm_post_reduced, *norm_post_spatial, *norm_post_expanded;
 	int post_reduced_size, post_spatial_size, output_size;
 
 	post_reduced_size = reduced_depth * incoming_spatial_dim * incoming_spatial_dim * batch_size;
 	cudaMalloc(&post_reduced, post_reduced_size * sizeof(float));
 	activation_conv_block -> post_reduced_size = post_reduced;
 
+	cudaMalloc(&norm_post_reduced, post_reduced_size * sizeof(float));
+	activation_conv_block -> norm_post_reduced = norm_post_reduced;
+
 	post_spatial_size = reduced_depth * incoming_spatial_dim * incoming_spatial_dim / (stride * stride) * batch_size;
 	cudaMalloc(&post_spatial, post_spatial_size * sizeof(float));
 	activation_conv_block -> post_spatial = post_spatial;
+
+	cudaMalloc(&norm_post_spatial, post_spatial_size * sizeof(float));
+	activation_conv_block -> norm_post_spatial = norm_post_spatial;
 
 	output_size = expanded_depth * incoming_spatial_dim * incoming_spatial_dim / (stride * stride) * batch_size;
 	
 	cudaMalloc(&post_expanded, output_size * sizeof(float));
 	activation_conv_block -> post_expanded = post_expanded;
+
+	cudaMalloc(&norm_post_expanded, output_size * sizeof(float));
+	activation_conv_block -> norm_post_expanded = norm_post_expanded;
 
 	// only allocate space if transformed, otherwise it will be assumed to be identity of input
 	transformed_residual = NULL;
@@ -507,10 +629,14 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 	int init_conv_stride = dims -> init_conv_stride;
 	int maxpool_stride = dims -> init_maxpool_stride;
 
-	float * init_conv_activation;
-	int init_conv_activation_size = init_conv_filters * input_dim * input_dim / (init_stride * init_stride) * batch_size; 
-	cudaMalloc(&init_conv_activation, init_conv_activation_size);
-	activations -> init_conv_activation = init_conv_activation;
+	float * init_conv_applied;
+	int init_conv_applied_size = init_conv_filters * input_dim * input_dim / (init_stride * init_stride) * batch_size; 
+	cudaMalloc(&init_conv_applied, init_conv_applied_size * sizeof(float));
+	activations -> init_conv_applied = init_conv_applied;
+
+	float * norm_init_conv_activations;
+	cudaMalloc(&norm_init_conv_activations, init_conv_applied_size * sizeof(float));
+	activations -> norm_init_conv_activations = norm_init_conv_activations;
 
 	float *init_convblock_input;
 	int init_convblock_input_size = init_conv_filters * input_dim * input_dim / (init_stride * init_stride) / (maxpool_stride * maxpool_stride) * batch_size;
