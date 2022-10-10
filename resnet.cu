@@ -1252,6 +1252,7 @@ void forward_pass(Train_ResNet * trainer){
 		conv_block_input = norm_output;
 	}
 
+	float * final_conv_block_output = activations_conv_blocks[n_conv_blocks - 1] -> output_activated;
 
 	// NEED TO DO AVERAGE POOL OF LAST LAYER to go from (2048, 7, 7) to (2048, 1, 1)
 
