@@ -1222,7 +1222,7 @@ void forward_pass(Train_ResNet * trainer){
 		projection_biases = cur_conv_block_params -> bias_projection;
 
 
-		total_size_conv_block_output = spatial_dim * spatial_dim * filters * batch_size;
+		total_size_conv_block_output = out_spatial_dim * out_spatial_dim * out_filters * batch_size;
 		conv_block_output = cur_conv_block_activation -> output;
 				
 		// the conv_block initializer already handled if we need projection, and if so it allocated weights
@@ -1261,7 +1261,7 @@ void forward_pass(Train_ResNet * trainer){
 
 
 	// FINISH UP BY POPULATING PREDICTIONS
-	
+
 }
 
 
