@@ -54,7 +54,6 @@ typedef struct {
 	// kernel weights for output 1x1 step 
 	float * depth_expansion;
 	float * bias_depth_expansion;
-	BatchNorm * norm_depth_expansion;
 	// need a projection is input dims != output dims
 	// contains pointers to convluations transforming input to output to add as residual
 	// occurs between stages:
@@ -63,10 +62,12 @@ typedef struct {
 	// transform stage 1 output (512, 28, 28) -> stage 2 output (1024, 14, 14)
 	// transform stage 2 output (1024, 14, 14) -> stage 3 output (2048, 7, 7) 
 	// going from 2048 average pooled outputs of last conv layer to 1000 classes softmax
-	// dimensions in_depth X out_depth
-	// do average over (out_spatial_dim/in_spatial_dim)^2 region over the in_spatial_dim before doing depth projection
-	// average insures some sptial pixels not ignored
+	// if depths are different than need a projection (if spatial also different then will do a 3x3, stride 2 kernel over block input)
+	// if depths different, but same spatial, then do a 1x1 convolution
 	float * projection;
+	// will be equal to number of output filters
+	float * bias_projection;
+	BatchNorm * norm_residual_added;
 } ConvBlock;
 
 typedef struct{
@@ -109,14 +110,16 @@ typedef struct {
 	float *post_spatial_activated;
 
 	float *post_expanded;
-	Cache_BatchNorm * norm_post_expanded;
 
 	// if input dim of block != output dim of block, need to apply a transform 
 	// (otherwise null which implies identity of output of previous block)
 	float *transformed_residual;
 	// occurs after adding last layer to residual connection
-	// adding transformed_residual (or equivalently input of block == output of prev block) to norm_post_expanded -> normalized, then ReLU
+	// adding transformed_residual (or equivalently input of block == output of prev block) to norm_post_expanded -> normalized
 	float *output;
+	Cache_BatchNorm * norm_post_residual_added;
+	// doing normalization, then ReLU
+	float *output_activated;
 } Activation_ConvBlock;
 
 typedef struct{
