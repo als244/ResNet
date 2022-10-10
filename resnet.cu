@@ -1239,6 +1239,7 @@ void forward_pass(Train_ResNet * trainer){
 			transformed_residual = conv_block_input;
 		}
 
+		// add identity residual connection (or projected residual connection) to the prior convolutional output
 		addVec <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size, conv_output, transformed_residual, conv_block_output);
 
 		norm_input = conv_block_output;
