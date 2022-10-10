@@ -1268,6 +1268,14 @@ void forward_pass(Train_ResNet * trainer){
 
 }
 
+void backwards_pass(Train_ResNet * trainer){
+	// TODO
+}	
+
+void update_parameters(Train_ResNet * trainer){
+	// TODO
+}
+
 
 
 int main(int argc, char *argv[]) {
