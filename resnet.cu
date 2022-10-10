@@ -971,7 +971,7 @@ void * load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	// each image is also linearized where ording of pixels is - 0, 0: (R, G, B) then 0, 1: (R,G,B), ...
 
 	for (int pixel = 0; pixel < total_pixels; pixel++){
-		images_float_cpu[pixel] = (float) images_cpu[pixel];
+		images_float_cpu[pixel] = ((float) (images_cpu[pixel])) * (2.0 / 255) - 1;
 	}
 
 	cudaMemcpy(images, images_float_cpu, total_pixels * sizeof(float), cudaMemcpyHostToDevice);
