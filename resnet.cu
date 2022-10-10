@@ -1145,6 +1145,8 @@ void forward_pass(Train_ResNet * trainer){
 		out_filters = cur_conv_block_params -> reduced_depth;
 		kern_dim = 1;
 		stride = 1;
+		// either intialized first time above loop from the maxpool
+		// every other block will be the normalized, activated output of previous conv block (previous iteration output) 
 		conv_input = conv_block_input;
 		conv_weights = cur_conv_block_params -> depth_reduction;
 		conv_biases = cur_conv_block_params -> bias_depth_reduction;
