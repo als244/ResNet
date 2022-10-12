@@ -160,8 +160,6 @@ typedef struct{
 	float * pred;
 	// copy to cpu
 	float * pred_cpu;
-	// predicted label
-	char ** predicted_labels;
 } Forward_Buffer;
 
 typedef struct{

@@ -269,6 +269,31 @@ __global__ void doMaxPool(const float * input, int kern_dim, int stride, int bat
 	}
 }
 
+
+// assume grid launch of (# Filters) and block dim of (batch size)
+// could parallelize over batches as well, but probably ok. 
+// *runs into issues if #filters greater than threads per block
+__global__ void doFilterAvgPool(const float * input, int spatial_dim, float * out){
+
+	int filter_id = blockIdx.x;
+	int sample_ind = threadIdx.x;
+
+	// know this because of launch specification
+	int filters = blockDim.x;
+
+	float sum = 0;
+	for (int row = 0; row < spatial_dim; row++){
+		for (int col = 0; col < spatial_dim; col++){
+			sum += input[spatial_dim * spatial_dim * filters * sample_ind + spatial_dim * filters * row + filters * col + filter_id];
+		}
+	}
+
+	float avg_val = sum / (spatial_dim * spatial_dim);
+	out[filters * sample_ind + filter_id] = avg_val;
+}
+
+
+
 // hardcoded conv kernel for initial 7x7, stride 2, 64 output filter convolutional layer...
 // launching (14, 112, BATCH_SIZE) dim blocks where each block has 112/14=8 phases to utilize shared memory. Each block will have dim (64).
 // Each block will contribute 16 unique spatial inds * 64 output filters * 32 Batch Size to the output of layer
@@ -358,17 +383,18 @@ __global__ void optimized_init_conv(const float * input, const float * weights, 
 
 
 
-// assume pass in 1-D block
-// assume X is a matrix where # rows = output_len and # columns = batch size
-__global__ void softMax(int batch_size, int output_len, float*X){
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
+// assume pass in 1-D block with batch size blocks and 1 thread per block
+// could exploit more parallelism here but shouldnt be bottleneck for now...
+// assume X is a matrix where # rows = batch size and # columns = output dim
+__global__ void softMax(const float * X, int batch_size, int output_len, float * out){
+  int i = blockIdx.x;
   if (i < batch_size){
     float sum = 0;
     for (int j = 0; j < output_len; j++){
-      sum += __expf(X[i + batch_size * j]);
+      sum += __expf(X[i * output_len + j]);
     }
     for (int j = 0; j < output_len; j++){
-      X[i + batch_size * j] = __expf(X[i + batch_size * j]) / sum;
+      out[i * output_len + j] = __expf(X[i * output_len + j]) / sum;
     }
   }
 }
@@ -849,16 +875,12 @@ Forward_Buffer * init_forward_buffer(Dims * dims, ConvBlock ** conv_blocks, int 
 	int output_size = output_dim * batch_size;
 
 	float * pred;
-	cudaMalloc(&pred, output_size * sizeof(float));
+	cudaMalloc(&pred, output_size * batch_size * sizeof(float));
 	forward_buffer -> pred = pred;
 
 	// will be copied to cpu to be able to print values and compute loss on cpu side
-	float * pred_cpu = malloc(output_size * sizeof(float));
-	// will be the maximum of prediction of each sample in batch and converted to label string
-	char ** predicted_labels = malloc(batch_size * sizeof(char *));
-
+	float * pred_cpu = malloc(output_size * batch_size * sizeof(float));
 	forward_buffer -> pred_cpu = pred_cpu;
-	forward_buffer -> predicted_labels = predicted_labels;
 
 	return forward_buffer;
 }
@@ -1253,19 +1275,39 @@ void forward_pass(Train_ResNet * trainer){
 		conv_block_input = norm_output;
 	}
 
+	int final_filters = dims -> final_depth;
+	int final_spatial_dim = conv_blocks[n_conv_blocks - 1] -> incoming_spatial_dim;
 	float * final_conv_block_output = activations_conv_blocks[n_conv_blocks - 1] -> output_activated;
+	float * final_avg_pool_values = trainer -> forward_buffer -> activations -> final_conv_output_pooled;
 
-	// NEED TO DO AVERAGE POOL OF LAST LAYER to go from (7, 7, 2048) to (1, 1, 2048)
+	// NEED TO DO AVERAGE POOL OF LAST LAYER to go from (7, 7, 2048, batch size) to (1, 1, 2048, batch size)
+
+	// format of output is each row is a sample and has a row size of 2048
+	doFilterAvgPool <<< (final_filters), (batch_size) >>> (final_conv_block_output, final_spatial_dim, final_avg_pool_values);
 
 
 	// APPLY FULLY CONNECTED LAYER BETWEEN (2048, 1000)
+	float * fc_weights = trainer -> model -> params -> fully_connected;
+	float * fc_output = trainer -> forward_buffer -> activations -> linear_output;
+	int output_dim = dims -> output;
 
+	// matrix multiply between (N, 2048) and fc weights of (2048, 1000), yields output of (N, 1000)
+	// output is each row is a unique sample
+
+	// GRID has dim (OUT_ROWS / TILE_WIDTH, OUT_COLS/TILE_WIDTH)
+	// each BLOCK has dim (TILE_WIDTH, TILE_WIDTH)
+	dim3 gridDimFCOutput(ceil((float) batch_size / TILE_WIDTH), ceil((float) output_dim / TILE_WIDTH));
+	dim3 blockDimFCOutput(TILE_WIDTH, TILE_WIDTH);
+
+	matMul <<< (gridDimFCOutput), (blockDimFCOutput) >>> (final_avg_pool_values, fc_weights, batch_size, final_filters, output_dim, fc_output);
 
 	// DO SOFTMAX
+	float * pred = trainer -> forward_buffer -> pred;
+	softMax <<< (batch_size), (1) >>> (fc_output, batch_size, output_dim, pred);
 
-
-	// FINISH UP BY POPULATING PREDICTIONS
-
+	// FINISH UP BY POPULATING PREDICTIONS ONTO CPU
+	float * pred_cpu = trainer -> forward_buffer -> pred_cpu;
+	cudaMemcpy(pred_cpu, pred, batch_size * output_dim * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 void backwards_pass(Train_ResNet * trainer){
