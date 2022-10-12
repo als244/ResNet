@@ -399,6 +399,33 @@ __global__ void softMax(const float * X, int batch_size, int output_len, float *
   }
 }
 
+// assume large 1-D launch
+__global__ void updateMeans(int size, const float * gradients, float base_mean_decay, float * prev_means){
+	int i = blockDim.x * blockIdx.x + threadIdx.x;
+	if (i >= size){
+		return;
+	}
+	prev_means[i] = base_mean_decay * prev_means[i] + (1 - base_mean_decay) * gradients[i];
+}
+
+// assume large 1-D launch
+__global__ void updateVars(int size, const float * gradients, float base_var_decay, float * prev_vars){
+	int i = blockDim.x * blockIdx.x + threadIdx.x;
+	if (i >= size){
+		return;
+	}
+	float grad = gradients[i];
+	prev_vars[i] = base_var_decay * prev_vars[i] + (1 - base_var_decay) * grad * grad;
+}
+
+// assume large 1-D launch
+__global__ void updateParams(int size, float * model_params, const float * means, const float * vars, float alpha_t, float eps){
+	int i = blockDim.x * blockIdx.x + threadIdx.x;
+	if (i >= size){
+		return;
+	}
+	model_params[i] = model_params[i] - alpha_t * means[i] / (sqrtf(vars[i]) + eps);
+}
 
 /* INITIALIZE CORE MODEL STRUCTURES */
 
@@ -1314,8 +1341,52 @@ void backwards_pass(Train_ResNet * trainer){
 	// TODO
 }	
 
+
+// doing ADAM optimizer
 void update_parameters(Train_ResNet * trainer){
-	// TODO
+	
+	float learning_rate = trainer -> learning_rate;
+	float base_mean_decay = trainer -> base_mean_decay;
+	float base_var_decay = trainer -> base_var_decay;
+	// update the running decays here...
+	float cur_mean_decay = trainer -> cur_mean_decay * base_mean_decay;
+	float cur_var_decay = trainer -> cur_var_decay * base_mean_decay;
+	float eps = trainer -> eps;
+
+	Params * model_params = trainer -> model -> params;
+	float ** model_params_locations = model_params -> locations;
+	int * param_sizes = model_params -> sizes;
+	int n_locations = model_params -> n_locations;
+
+	// values calculated from backprop, will reset these before returning
+	Params * current_gradients = trainer -> backprop_buffer -> param_derivs;
+	float ** current_gradient_locations = current_gradients -> locations;
+	
+	// running history values that the optimizer needs, will update these before returning
+	Params * prev_grad_means = trainer -> backprop_buffer -> prev_means;
+	float ** prev_grad_means_locations = prev_grad_means -> locations;
+	Params * prev_grad_vars = trainer -> backprop_buffer -> prev_vars;
+	float ** prev_grad_vars_locations = prev_grad_vars -> locations;
+
+	int param_size;
+	float *model_location, *grad_location, * mean_location, * var_location;
+	
+	// update learning rate
+	float alpha_t = learning_rate * sqrtf(1 - cur_var_decay) / (1 - cur_mean_decay);
+
+	for (int i = 0; i < n_locations; i++){
+		param_size = param_sizes[i];
+		model_location = model_params_locations[i];
+		grad_location = current_gradient_locations[i];
+		mean_location = prev_grad_means_locations[i];
+		var_location = prev_grad_vars_locations[i];
+
+		updateMeans <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_mean_decay, mean_location);
+		updateVars <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_var_decay, var_location);
+		updateParams <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, model_location, mean_location, var_location, alpha_t, eps);
+
+		cudaMemset(grad_location, 0, param_size * sizeof(float));
+	}
 }
 
 
