@@ -1338,7 +1338,26 @@ void forward_pass(Train_ResNet * trainer){
 }
 
 void backwards_pass(Train_ResNet * trainer){
-	// TODO
+	
+	Dims * dims = trainer -> model -> dims;
+	int batch_size = trainer -> batch_size;
+	int output_dim = dims -> output;
+	// GET LAST LAYER DERIVATIVE
+	// layer has output_dim * batch_size values
+	// End of network was: fully connected layer -> softmax
+	// Derivative of cross entropy loss w.r.t to fully connected values is: s - y where s is softmax value
+	// thus copy softmax values and subtract 1 from the correct index (we know labels y are 0 except correct label of 1)
+	float * correct_classes = trainer -> cur_batch -> correct_classes;
+	float * pred = trainer -> forward_buffer -> pred;
+	float * output_layer_deriv = trainer -> backprop_buffer -> output_layer_deriv;
+	cudaMemcpy(output_layer_deriv, pred, batch_size * output_dim * sizeof(float), cudaMemcpyDeviceToDevice);
+	for (int s = 0; s < batch_size; s++){
+		output_layer_deriv[s * output_dim + correct_classes[s]] -= 1;
+	}
+
+	// pass backwards from output of fully connected to fc weights and avg pool layer...
+
+
 }	
 
 
