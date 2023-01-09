@@ -292,94 +292,122 @@ __global__ void doFilterAvgPool(const float * input, int spatial_dim, float * ou
 	out[filters * sample_ind + filter_id] = avg_val;
 }
 
+// assume grid launch of (# Filters) and block dim of (batch size)
+// could parallelize over batches as well, but probably ok. 
+// *runs into issues if #filters greater than threads per block
+__global__ void filterAvgPoolDeriv(const float * pooled_deriv, int filters, int batch_size, int spatial_dim, float * out){
+
+	int filter_id = blockIdx.x;
+	int sample_ind = threadIdx.x;
+
+	// unnecessary because of launch conditions, but putting anyways...
+	if ((filter_id >= filters) || (sample_ind >= batch_size)){
+		return;
+	}
+
+	// indexing into (N, 2048) = (batch_size, filters) matrix 
+	float pooled_filt_deriv = pooled_deriv[sample_ind * filters + filter_id];
+	float avg_pooled_filt_deriv = pooled_filt_deriv / (spatial_dim * spatial_dim);
+
+	// populating the pre-pooled conv block output
+	for (int row = 0; row < spatial_dim; row++){
+		for (int col = 0; col < spatial_dim; col++){
+			out[spatial_dim * spatial_dim * filters * sample_ind + spatial_dim * filters * row + filters * col + filter_id] = avg_pooled_filt_deriv;
+		}
+	}
+}
+
 
 
 // hardcoded conv kernel for initial 7x7, stride 2, 64 output filter convolutional layer...
 // launching (14, 112, BATCH_SIZE) dim blocks where each block has 112/14=8 phases to utilize shared memory. Each block will have dim (64).
 // Each block will contribute 16 unique spatial inds * 64 output filters * 32 Batch Size to the output of layer
 // each phase loads stride new rows into shared memory, then multiples new spatial shared_mem with conv_weights, accounting for conv weight col permuation 
-__global__ void optimized_init_conv(const float * input, const float * weights, float * out){
 
-	__shared__ float conv_weights[64][147];
-	__shared__ float spatial_vals[147];
+/* MAY OR MAY NOT WORK... (commented becuase not used...) */
 
-	// index
-	int output_filter = threadIdx.x;
-	int sample_ind = blockIdx.z;
+// __global__ void optimized_init_conv(const float * input, const float * weights, float * out){
 
-	// assume weights are in order of outfilter 0: [R_0,0, B_0,0, G_0,0, R_0,1, G_0,1, B_0,1....R_6,6, G_6,6, B_6,6], outfilter 1: [...], ...., outfilter 63: [...]
-	for (int kernel_ind = 0; kernel_ind < 147; kernel_ind++){
-		conv_weights[output_filter][kernel_ind] = weights[output_filter * 147 + kernel_ind];
-	}
+// 	__shared__ float conv_weights[64][147];
+// 	__shared__ float spatial_vals[147];
 
-	// 2 * vals because stride of 2
-	int spatial_row_start = (224 / blockDim.x) * blockIdx.x;
-	int spatial_col_start = 2 * blockIdx.y;
-	int spatial_row, spatial_col, kernel_ind;
-	int half_kernel_dim = 3;
-	for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim;  row_offset++){
-		for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
-			for (int channel = 0; channel < 3; channel++){
-				spatial_row = spatial_row_start + row_offset;
-				spatial_col = spatial_col_start + col_offset;
-				kernel_ind = 7 * 3 * (row_offset + half_kernel_dim) + 3 * (col_offset + half_kernel_dim) + channel;
-				if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
-					spatial_vals[kernel_ind] = 0;
-				}
-				else{
-					spatial_vals[kernel_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
-				}
-			}
-		}
-	}
+// 	// index
+// 	int output_filter = threadIdx.x;
+// 	int sample_ind = blockIdx.z;
 
-	__syncthreads();
+// 	// assume weights are in order of outfilter 0: [R_0,0, B_0,0, G_0,0, R_0,1, G_0,1, B_0,1....R_6,6, G_6,6, B_6,6], outfilter 1: [...], ...., outfilter 63: [...]
+// 	for (int kernel_ind = 0; kernel_ind < 147; kernel_ind++){
+// 		conv_weights[output_filter][kernel_ind] = weights[output_filter * 147 + kernel_ind];
+// 	}o
 
-	float val = 0;
-	int circular_row = 0;
-	int out_spatial_row = (112 / blockDim.x) * blockIdx.x;
-	int out_spatial_col = blockIdx.y;
-	int new_top_row = 0;
-	for (int phase = 0; phase < 8; phase++){
+// 	// 2 * vals because stride of 2
+// 	int spatial_row_start = (224 / blockDim.x) * blockIdx.x;
+// 	int spatial_col_start = 2 * blockIdx.y;
+// 	int spatial_row, spatial_col, kernel_ind;
+// 	int half_kernel_dim = 3;
+// 	for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim;  row_offset++){
+// 		for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
+// 			for (int channel = 0; channel < 3; channel++){
+// 				spatial_row = spatial_row_start + row_offset;
+// 				spatial_col = spatial_col_start + col_offset;
+// 				kernel_ind = 7 * 3 * (row_offset + half_kernel_dim) + 3 * (col_offset + half_kernel_dim) + channel;
+// 				if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
+// 					spatial_vals[kernel_ind] = 0;
+// 				}
+// 				else{
+// 					spatial_vals[kernel_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
+// 				}
+// 			}
+// 		}
+// 	}
 
-		// compute matrix mult to get (output_filt x batch_size) result. this is for a single receptive field across depth and batches
-		// iterative over phases to get multiple receptive fields and exploit spatial locality
-		val = 0;
-		for (int kern_row = 0; kern_row < 7; kern_row++){
-			for (int kern_col = 0; kern_col < 7; kern_col++){
-				for (int ch = 0; ch < 3; ch++){
-					circular_row = (kern_row + 2 * phase) % 7;
-					val += conv_weights[output_filter][7 * 3 * kern_row + 3 * kern_col + ch] * spatial_vals[7 * 3 * circular_row + 3 * kern_col + ch];
-				}
-			}
-		}
+// 	__syncthreads();
 
-		out[112 * 112 * 64 * sample_ind + 112 * 64 * out_spatial_row + 64 * out_spatial_col + output_filter] = val;
+// 	float val = 0;
+// 	int circular_row = 0;
+// 	int out_spatial_row = (112 / blockDim.x) * blockIdx.x;
+// 	int out_spatial_col = blockIdx.y;
+// 	int new_top_row = 0;
+// 	for (int phase = 0; phase < 8; phase++){
 
-		__syncthreads();
+// 		// compute matrix mult to get (output_filt x batch_size) result. this is for a single receptive field across depth and batches
+// 		// iterative over phases to get multiple receptive fields and exploit spatial locality
+// 		val = 0;
+// 		for (int kern_row = 0; kern_row < 7; kern_row++){
+// 			for (int kern_col = 0; kern_col < 7; kern_col++){
+// 				for (int ch = 0; ch < 3; ch++){
+// 					circular_row = (kern_row + 2 * phase) % 7;
+// 					val += conv_weights[output_filter][7 * 3 * kern_row + 3 * kern_col + ch] * spatial_vals[7 * 3 * circular_row + 3 * kern_col + ch];
+// 				}
+// 			}
+// 		}
 
-		int row_to_replace, replace_ind;
-		for (int i = 1; i <= 2; i++){
-			row_to_replace = (2 * phase) + i % 7;
-			spatial_row = spatial_row_start + half_kernel_dim + 2 * phase + i; 
-			for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
-				for (int channel = 0; channel < 3; channel++){
-					spatial_col = spatial_col_start + col_offset;
-					replace_ind = 7 * 3 * row_to_replace + 3 * (col_offset + half_kernel_dim) + channel;
-					if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
-						spatial_vals[replace_ind][sample_ind] = 0;
-					}
-					else{
-						spatial_vals[replace_ind][sample_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
-					}
-				}
-			}
-		}
-		out_spatial_row++;
+// 		out[112 * 112 * 64 * sample_ind + 112 * 64 * out_spatial_row + 64 * out_spatial_col + output_filter] = val;
 
-		__syncthreads();
-	}
-}
+// 		__syncthreads();
+
+// 		int row_to_replace, replace_ind;
+// 		for (int i = 1; i <= 2; i++){
+// 			row_to_replace = (2 * phase) + i % 7;
+// 			spatial_row = spatial_row_start + half_kernel_dim + 2 * phase + i; 
+// 			for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
+// 				for (int channel = 0; channel < 3; channel++){
+// 					spatial_col = spatial_col_start + col_offset;
+// 					replace_ind = 7 * 3 * row_to_replace + 3 * (col_offset + half_kernel_dim) + channel;
+// 					if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
+// 						spatial_vals[replace_ind][sample_ind] = 0;
+// 					}
+// 					else{
+// 						spatial_vals[replace_ind][sample_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
+// 					}
+// 				}
+// 			}
+// 		}
+// 		out_spatial_row++;
+
+// 		__syncthreads();
+// 	}
+// }
 
 
 
@@ -397,6 +425,14 @@ __global__ void softMax(const float * X, int batch_size, int output_len, float *
       out[i * output_len + j] = __expf(X[i * output_len + j]) / sum;
     }
   }
+}
+
+// launch with gridDim = (batch_size), blockDim = (1)
+__global__ void crossEntropyDeriv(float * output_deriv, const float * correct_classes, int output_dim, int batch_size){
+	int i = blockIdx.x;
+	if (i < batch_size){
+		output_deriv[i * output_dim + correct_classes[i]] -= 1;
+	}
 }
 
 // assume large 1-D launch
@@ -1130,6 +1166,22 @@ void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_Batch
 
 }
 
+void prepareAndDoMatMulLeftTranspose(const float * left_orig, const float * right, int left_orig_rows, int left_orig_cols, int right_rows, int right_cols, float * out){
+	float * temp_left;
+	cudaMalloc(&temp_left, left_orig_rows * left_orig_cols * sizeof(float));
+	transpose <<< (left_orig_rows / TILE_WIDTH, left_orig_cols / TILE_WIDTH), (TILE_WIDTH * BLOCK_ROWS) >>> (left_orig, left_orig_rows, left_orig_cols, temp_left);
+	matMul <<< (left_orig_cols / TILE_WIDTH, right_cols / TILE_WIDTH), (TILE_WIDTH, TILE_WIDTH) >>> (temp_left, right, left_orig_cols, right_rows, right_cols, out);
+	cudaFree(temp_left);
+}
+
+void prepareAndDoMatMulRightTranspose(const float * left, const float * right_orig, int left_rows, int left_cols, int right_orig_rows, int right_orig_cols, float * out){
+	float * temp_right;
+	cudaMalloc(&temp_right, right_orig_rows * right_orig_cols * sizeof(float));
+	transpose <<< (right_orig_rows / TILE_WIDTH, right_orig_cols / TILE_WIDTH), (TILE_WIDTH * BLOCK_ROWS) >>> (right_orig, right_orig_rows, right_orig_cols, temp_right);
+	matMul <<< (left_rows / TILE_WIDTH, right_orig_rows / TILE_WIDTH), (TILE_WIDTH, TILE_WIDTH) >>> (left, temp_right, left_rows, left_cols, right_orig_rows, out);
+	cudaFree(temp_right);
+}
+
 void forward_pass(Train_ResNet * trainer){
 
 	Dims * dims = trainer -> model -> dims;
@@ -1174,7 +1226,7 @@ void forward_pass(Train_ResNet * trainer){
 
 	
 	ConvBlock ** params_conv_blocks = trainer -> model -> params -> conv_blocks;
-	Activation_ConvBlock ** activations_conv_blocks = trainer -> forward_buffer -> activations -> activation_conv_blocks;
+	Activation_ConvBlock ** activation_conv_blocks = trainer -> forward_buffer -> activations -> activation_conv_blocks;
 	ConvBlock * cur_conv_block_params;
 	Activation_ConvBlock * cur_conv_block_activation;
 	int in_spatial_dim, kern_dim, in_filters, out_filters, stride, out_spatial_dim, total_size_conv_block_output;
@@ -1186,7 +1238,7 @@ void forward_pass(Train_ResNet * trainer){
 	Cache_BatchNorm * cur_batch_norm_cache;
 	for (int i = 0; i < n_conv_blocks; i++){
 		cur_conv_block_params = params_conv_blocks[i];
-		cur_conv_block_activation = params_conv_blocks[i];
+		cur_conv_block_activation = activation_conv_blocks[i];
 
 		// do first 1x1 depth_reduce convolution
 		in_spatial_dim = cur_conv_block_params -> incoming_spatial_dim;
@@ -1303,8 +1355,8 @@ void forward_pass(Train_ResNet * trainer){
 	}
 
 	int final_filters = dims -> final_depth;
-	int final_spatial_dim = conv_blocks[n_conv_blocks - 1] -> incoming_spatial_dim;
-	float * final_conv_block_output = activations_conv_blocks[n_conv_blocks - 1] -> output_activated;
+	int final_spatial_dim = params_conv_blocks[n_conv_blocks - 1] -> incoming_spatial_dim;
+	float * final_conv_block_output = activation_conv_blocks[n_conv_blocks - 1] -> output_activated;
 	float * final_avg_pool_values = trainer -> forward_buffer -> activations -> final_conv_output_pooled;
 
 	// NEED TO DO AVERAGE POOL OF LAST LAYER to go from (7, 7, 2048, batch size) to (1, 1, 2048, batch size)
@@ -1342,20 +1394,83 @@ void backwards_pass(Train_ResNet * trainer){
 	Dims * dims = trainer -> model -> dims;
 	int batch_size = trainer -> batch_size;
 	int output_dim = dims -> output;
-	// GET LAST LAYER DERIVATIVE
+	Activations * activations = trainer -> forward_buffer -> activations;
+	Params * model_params = trainer -> model -> params;
+	Backprop_Buffer * backprop_buffer = trainer -> backprop_buffer;
+	Params * param_derivs = backprop_buffer -> param_derivs;
+	Activations * activation_derivs = backprop_buffer -> activation_derivs;
+
+	/* STEP 1: LAST LAYER DERIVATIVE */
+
 	// layer has output_dim * batch_size values
 	// End of network was: fully connected layer -> softmax
 	// Derivative of cross entropy loss w.r.t to fully connected values is: s - y where s is softmax value
 	// thus copy softmax values and subtract 1 from the correct index (we know labels y are 0 except correct label of 1)
 	float * correct_classes = trainer -> cur_batch -> correct_classes;
 	float * pred = trainer -> forward_buffer -> pred;
-	float * output_layer_deriv = trainer -> backprop_buffer -> output_layer_deriv;
+	float * output_layer_deriv = backprop_buffer -> output_layer_deriv;
 	cudaMemcpy(output_layer_deriv, pred, batch_size * output_dim * sizeof(float), cudaMemcpyDeviceToDevice);
-	for (int s = 0; s < batch_size; s++){
-		output_layer_deriv[s * output_dim + correct_classes[s]] -= 1;
+	crossEntropyDeriv <<< (batch_size), (1) >>> (output_layer_deriv, correct_classes, output_dim, batch_size);
+
+	/* STEP 2: FC WEIGHT DERIV AND FINAL AVG POOL (SECOND LAST ACTIVTION LAYER) DERIVATIVE */
+
+	// FC WEIGHTS (2048, 1000) DERIV = matMul(transpose(final_conv_output_pooled), output_layer_deriv)
+	int final_depth = dims -> final_depth;
+	float * fc_deriv = param_derivs -> fully_connected;
+	float * final_conv_output_pooled = activations -> final_conv_output_pooled;
+	prepareAndDoMatMulLeftTranspose(final_conv_output_pooled, output_layer_deriv, batch_size, final_depth, batch_size, output_dim, fc_deriv);
+
+	// FINAL AVG POOL (N, 2048) DERIV = matMul(output_layer_deriv, transpose(FC Weight))
+	float * fc_weights = model_params -> fully_connected;
+	float * final_avg_pool_deriv = activation_derivs -> final_conv_output_pooled;
+	prepareAndDoMatMulRightTranspose(output_layer_deriv, fc_weights, batch_size, output_dim, final_depth, output_dim, final_avg_pool_deriv);
+
+
+	/* CONV BLOCK DATA FROM FORWARD PASS */
+	int n_conv_blocks = dims -> n_conv_blocks;
+	ConvBlock ** params_conv_blocks = model_params -> conv_blocks;
+	Activation_ConvBlock ** activation_conv_blocks = activations -> activation_conv_blocks;
+	int final_spatial_dim = params_conv_blocks[n_conv_blocks - 1] -> incoming_spatial_dim;
+	
+	/* STEP 3: AVG POOL DERIV */
+
+	// get the location for the deriv of final conv block output
+	Activation_ConvBlock ** activation_conv_blocks_derivs = activation_derivs -> activation_conv_blocks;
+	float * final_conv_block_output_deriv = activation_conv_blocks_derivs[n_conv_blocks - 1] -> output_activated;
+	// using final_avg_pool_deriv (2048, batch_size) to populate final_conv_block_output_deriv (7, 7, 2048, batch_size)
+	// each expanded (prior to pooling) spatial index takes on value of given filter's avg_pool_deriv / (spatial_dim^2)
+	filterAvgPoolDeriv <<< (final_depth), (batch_size) >>> (final_avg_pool_deriv, final_depth, batch_size, final_spatial_dim, final_conv_block_output_deriv);
+
+	
+	/* STEP 4: CONV BLOCK & BATCH NORM DERIVS  */
+
+	// we are starting with deriv of last conv block output...
+
+	// To go backwards for each block we:
+		// 1.) Get deriv of batch norm for residual added to expanded conv output (with respect to both its own parameters and also the input to batch norm = expanded conv output)
+		// 2.) Get deriv projection filter & transformed (if there is a projection of residual, otherwise both derivs are 1)
+		// 3.) Multiply the deriv of input to batch norm * deriv of transformed residual and add to the deriv of first layer of conv block (= batch norm output of prior block)
+		// 4.) Get deriv of expanded convolution & deriv of input to expanded convolution (= batch norm output of spatial conv)
+		// 5.) Get deriv of batch norm for spatial conv output (with respect to both its own parameters and also the input to batch norm = spatial conv output)
+		// 6.) Get deriv of sptial convolution & deriv of input to spatial convolution (= batch norm output of reduced conv)
+		// 7.) Get deriv of batch norm for reduced conv output (with respect to both its own parameters and also the input to batch norm = reduced conv output)
+		// 8.) Get deriv of reduced convolution & deriv of input to reduced convolution, which is the first layer of conv block (= batch norm output of prior conv block)
+		// Items 3.) and 8.) provide the derivative used to repeat process for prior block
+
+	float * prior_block_output_deriv = final_conv_block_output_deriv;
+
+	for (int i = n_conv_blocks - 1; i >= 0; i--){
+		
+
+		
 	}
 
-	// pass backwards from output of fully connected to fc weights and avg pool layer...
+
+	/* STEP 5: MAX POOL DERIV */
+
+
+	/* STEP 6: INIT CONV & BATCH NORM DERIV */
+
 
 
 }	
