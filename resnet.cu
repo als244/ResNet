@@ -1616,9 +1616,9 @@ void backwards_pass(Train_ResNet * trainer){
 		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv)
 
 		// check if there is a projection (aka convolution over depth/kern_dim=1 or possibly stride=2/kern_dim=3), otherwise the projection deriv is 1
-		// If there is a projection need to compute derivative of the projection convolution kernel weights and deriv w.r.t. projection convolution input
+		// If there is a projection need to compute derivative of the projection convolution kernel weights and deriv w.r.t. projection convolution input=conv_block_input=prior_block_output_activated
 		
-		
+		// TODO: WRTIE CONVOLUTION DERIVATIVE KERNEL!
 
 		/* 3: Expanded Convolution Derivs */
 
