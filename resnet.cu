@@ -252,7 +252,9 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	// first compute dL/activated (relu deriv) and then dL/dNormalized_Temp (== x hat)
 	// also can compute dL/dGamma and dL/dBeta (parameters of batch norm)
 	int index;
-	float dGamma, dBeta, activated_val, out_layer_deriv_val, normalized_temp_val;
+	float dGamma = 0;
+	float dBeta = 0;
+	float activated_val, out_layer_deriv_val, normalized_temp_val;
 	for (int s = 0; s < batch_size; s++){
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
