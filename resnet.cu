@@ -1981,6 +1981,9 @@ void backwards_pass(Train_ResNet * trainer){
 
 	/* STEP 5: MAX POOL DERIV */
 
+	// backprop up through the init convblock input has been done. the gradient is at:
+	float * max_pool_out_deriv = activation_derivs -> init_convblock_input;
+
 
 	/* STEP 6: INIT CONV & BATCH NORM DERIV */
 
