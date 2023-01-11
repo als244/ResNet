@@ -34,7 +34,7 @@ __global__ void sample_gaussian(int size, float *X, float mean, float var) {
 }
 
 // ASSUME 1-D launch
-__global__ void addVec(int size, const float * A, const float * B, float * out){
+__global__ void addVec(int size, float * A, float * B, float * out){
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i >= size){
 		return;
@@ -113,16 +113,20 @@ __global__ void transpose(const float *in, int rows, int cols, float * out) {
   }
 }
 
+
+// TRIED TO OPTIMIZE: MAKE SURE THIS WORKS WITH SHARED MEM AND LAUNCH SPECS (FORGOT HOW I DID IT...)
 // 48KB is maximum value for shared memory, passed into this kernel as third param <<< gridDim, blockDim, SHARED_MEM_BYTES >>>
 // launch grid dimensions as (OUT_SPATIAL_DIM, OUT_SPATIAL_DIM, OUT_FILTER_CHUNK) blocks, and launch with block dim as (out_filt_rows_shared, sub_batch) threads
 // thus 12k floats is max for shared memory per block
 // first get as many output filter weights in shared memory as possible, but have separate blocks working on different chunks (OUT_FILTER_CHUNK * out_filt_rows_shared = out_filt)
 // then stream samples in batch to compute output value for each sample and output filter. Eac sub_batch will have batch_size / dim(sub_batch) samples to go over
-__global__ void doConvolution(const float * input, const float * weights, const float * biases, int spatial_dim, int kern_dim, int in_filt, int out_filt, int stride, int batch_size, float * out){
+__global__ void doConvolution(const float * input, const float * weights, const float * biases, int spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, float * out){
 
 	// will consist of (shared_out_filt_rows X (kern_dim^2 * in_filt) conv_weight matrix
 	extern __shared__ float shared_mem[];
 
+
+	// (Calling "Kernel" a 3-D obj of weights where there is 2-D conv filter for each input channel)
 	int kernel_size = (kern_dim * kern_dim * in_filt);
 
 	int spatial_row_start = stride * blockIdx.x;
@@ -134,7 +138,7 @@ __global__ void doConvolution(const float * input, const float * weights, const 
 	int out_filter_start, out_filter_id, spatial_row, spatial_col;
 	float out_val, spatial_val;
 	out_filter_id = blockIdx.z * blockDim.x + threadIdx.x;
-	if (out_filer_id >= out_filt){
+	if (out_filer_id >= out_filters){
 		return;
 	}
 
@@ -150,27 +154,177 @@ __global__ void doConvolution(const float * input, const float * weights, const 
 		out_val = 0;
 		for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim; row_offset++){
 			for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
-				for (int channel = 0; channel < in_filt; channel++){
+				for (int channel = 0; channel < in_filters; channel++){
 						
 					// compute spatial value
 					spatial_row = spatial_row_start + row_offset;
 					spatial_col = spatial_col_start + col_offset;
-					kernel_ind = kern_dim * in_filt * (row_offset + half_kernel_dim) + in_filt * (col_offset + half_kernel_dim) + channel;
+					kernel_ind = kern_dim * in_filters * (row_offset + half_kernel_dim) + in_filters * (col_offset + half_kernel_dim) + channel;
 					if ((spatial_row < 0) || (spatial_row >= spatial_dim) || (spatial_col < 0) || (spatial_col >= spatial_dim)) {
 						spatial_val = 0;
 					}
 					else{
-						spatial_val = input[spatial_dim * spatial_dim * in_filt * sample_ind + spatial_dim * in_filt * spatial_row + in_filt * spatial_col + channel];
+						spatial_val = input[spatial_dim * spatial_dim * in_filters * sample_ind + spatial_dim * in_filters * spatial_row + in_filters * spatial_col + channel];
 					}
 
 					// multiply with conv weight
+					// threadIdx.x specifies the output filter id
+					// kernel_ind specifies the (x, y, input_channel)
 					out_val += shared_mem[threadIdx.x * kernel_size + kernel_ind] * spatial_val;
 				}
 			}
 		}
-		out[out_spatial_dim * out_spatial_dim * out_filt * sample_ind + out_spatial_dim * out_filt * blockIdx.x + out_filt * blockIdx.y + out_filter_id] = out_val + biases[out_filter_id];
+		out[out_spatial_dim * out_spatial_dim * out_filters * sample_ind + out_spatial_dim * out_filters * blockIdx.x + out_filters * blockIdx.y + out_filter_id] = out_val + biases[out_filter_id];
 	}
 }
+
+// FOR NOW KEEP NAIVE (UN-OPTIMIZED)...
+// not bothering with shared memory for now...
+
+// Independent over (input filter, input_x, input_y, sample)
+// could use shared memory over conv weights...
+// Launch with gridDim (spatial_dim, spatial_dim, input_filters) and blockDim (batch_size)
+// Can parallelize further with reductions, if want to optimize
+__global__ void convolutionDerivInput(const float * input, const float * weights, const float * out_deriv, int spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, bool toAdd,
+											float * input_deriv){
+
+	int spatial_row = blockIdx.x;
+	int spatial_col = blockIdx.y;
+	int in_filter_id = blockIdx.z;
+	int sample_ind = threadIdx.x;
+	// shouldn't need to check based on launch specs, but will anyways...
+	if ((spatial_row >= spatial_dim) || (spatial_col >= spatial_dim) || (in_filter_id >= in_filters) || (sample_ind >= batch_size)){
+		return;
+	}
+
+	int out_spatial_dim = spatial_dim / (stride * stride);
+	int half_kernel_dim = kern_dim / 2;
+	int out_spatial_row_start = spatial_row / stride;
+	int out_spatial_col_start = spatial_col / stride;
+	int kern_ind, out_spatial_ind, kern_row_ind, kern_col_ind;
+	int kernel_size = (kern_dim * kern_dim * in_filters);
+	float out_spatial_val_deriv;
+	float total_deriv = 0;
+	for (int out_filt_id = 0; out_filt_id < out_filters; out_filt_id++){
+		for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim; row_offset++){
+			for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
+				// compute output spatial value that used the input spatial value
+				out_spatial_row = out_spatial_row_start + row_offset;
+				out_spatial_col = out_spatial_col_start + col_offset;
+				// index of output spatial val (iterate over samples in batch, then rows, then columns, then channels)
+				out_spatial_ind = out_spatial_dim * out_spatial_dim * out_filters * sample_ind + out_spatial_dim * out_filters * out_spatial_row + out_filters * out_spatial_col + out_filt_id;
+
+				// get kernel index used to generate out spatial value for corresponding input spatial value
+				kern_row_ind = spatial_row - out_spatial_row * stride + half_kernel_dim;
+				kern_col_ind = spatial_col - out_spatial_col * stride + half_kernel_dim;
+				kern_ind = kern_dim * in_filters * kern_row_ind + in_filters * kern_col_ind + in_filter_id;
+				if ((kern_row_ind < 0) || (kern_row_ind >= kern_dim) || (kern_col_ind < 0) || (kern_col_ind >= kern_dim) ||
+						(out_spatial_row < 0) || (out_spatial_row >= out_spatial_dim) || (out_spatial_col < 0) || (out_spatial_col >= out_spatial_dim)) {
+					out_spatial_val_deriv = 0;
+				}
+				else{
+					out_spatial_val_deriv = weights[out_filt_id * kernel_size + kern_ind] * out_deriv[out_spatial_ind];
+				}
+				total_deriv += out_spatial_val_deriv;
+			}
+		}
+	}
+	int input_spatial_ind = spatial_dim * spatial_dim * in_filters * sample_ind + spatial_dim * in_filters * spatial_row + in_filters * spatial_col + in_filter_id;
+	// used because normal backprop + residual adds to deriv
+	if (toAdd){
+		input_deriv[input_spatial_ind] += total_deriv;
+	}
+	else{
+		input_deriv[input_spatial_ind] = total_deriv;
+	}
+	
+}
+
+// FOR NOW KEEP NAIVE (UN-OPTIMIZED)...
+// not bothering with shared memory for now...
+
+// Independent over (input filter, output filter, kern_x, kern_x)
+// could use shared memory over input values...
+// Launch with gridDim (input_filters, output_filters) and blockDim (kern_dim, kern_dim)
+__global__ void convolutionDerivWeights(const float * input, const float * weights, const float * out_deriv, int spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size,
+											float * weight_deriv){
+
+	int in_filter_id = blockIdx.x;
+	int out_filter_id = blockIdx.y;
+
+	int kern_row = threadIdx.x;
+	int kern_col = threadIdx.y;
+
+	// shouldn't need to check based on launch specs, but will anyways...
+	if ((in_filter_id >= in_filters) || (out_filter_id >= out_filters) || (kern_row >= kern_dim) || (kern_col >= kern_dim)){
+		return;
+	}
+
+	int kern_ind = kern_dim * in_filters * kern_row + in_filters * kern_col + in_filter_id;
+
+	int kernel_size = (kern_dim * kern_dim * in_filters);
+	int half_kernel_dim = kern_dim / 2;
+	int out_spatial_dim = spatial_dim / (stride * stride);
+	int in_spatial_row, in_spatial_col, in_spatial_ind, out_spatial_ind;
+	float out_spatial_val_deriv;
+	float total_deriv = 0;
+	for (int s = 0; s < batch_size; s++){
+		for (int out_row = 0; out_row < out_spatial_dim; out_row++){
+			for (int out_col = 0; out_col < out_spatial_dim; out_col++){
+
+				// given out_row, out_col, kern_row, kern_col => get the input value used to generate output
+				in_spatial_row = stride * out_row + kern_row - half_kernel_dim;
+				in_spatial_col = stride * out_col + kern_col - half_kernel_dim;
+
+				// accounting for input filter and sample in batch get index into the input values
+				in_spatial_ind = spatial_dim * spatial_dim * in_filters * s + spatial_dim * in_filters * in_spatial_row + in_filters * in_spatial_col + in_filter_id;
+
+				// going from sample, out_row, out_col, out_filter to get index into out_deriv values
+				out_spatial_ind = out_spatial_dim * out_spatial_dim * out_filters * s + out_spatial_dim * out_filters * out_row + out_filters * out_col + out_filter_id;
+
+				if ((in_spatial_row < 0) || (in_spatial_row >= spatial_dim) || (in_spatial_col < 0) || (in_spatial_col >= spatial_dim)){
+					out_spatial_val_deriv = 0;
+				}
+				else{
+					out_spatial_val_deriv = input[in_spatial_ind] * out_deriv[out_spatial_ind];
+				}
+				total_deriv += out_spatial_val_deriv;
+			}
+		}
+	}
+	weight_deriv[kernel_size * out_filter_id + kern_ind] = total_deriv;
+}
+
+
+// FOR NOW KEEP NAIVE (UN-OPTIMIZED)...
+// not bothering with shared memory for now...
+// Independent over (out_filters)
+// Could incorportate into other deriv kernels (weights easily), but separate for semantic clarity
+// To optimize can reduce over samples or in_filters...
+// Launch with gridDim (output_filter) and blockDim (1)
+__global__ void convolutionDerivBiases(const float * input, const float * weights, const float * out_deriv, int spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size,
+											float * bias_deriv){
+	int out_filter_id = blockIdx.x;
+	// shouldn't need to check based on launch specs, but will anyways...
+	if (out_filer_id >= out_filters){
+		return;
+	}
+
+	int out_spatial_dim = spatial_dim / (stride * stride);
+	int out_spatial_ind;
+	float total_deriv = 0;
+	for (int s = 0; s < batch_size; s++){
+		for (int out_row = 0; out_row < out_spatial_dim; out_row++){
+			for (int out_col = 0; out_col < out_spatial_dim; out_col++){
+				// going from sample, out_row, out_col, out_filter to get index into out_deriv values
+				out_spatial_ind = out_spatial_dim * out_spatial_dim * out_filters * s + out_spatial_dim * out_filters * out_row + out_filters * out_col + out_filter_id;
+				total_deriv += out_deriv[out_spatial_ind];
+			}
+		}
+	}
+	bias_deriv[out_filter_id] = total_deriv;
+}
+
 
 // iterating over each filter separately
 // launch with (OUTFILTERS) grid dim and thread dim of 1 (could easily parallelize menas + vars, with reduction, but save for later..)
@@ -1233,6 +1387,17 @@ void prepareAndDoConvolution(int in_spatial_dim, int kern_dim, int in_filters, i
 
 }
 
+
+void prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, bool toAdd,
+												float * input, float * weights, float * out_deriv,
+												float * input_deriv, float * weight_deriv, float * bias_deriv){
+
+	convolutionDerivInput <<< (in_spatial_dim, in_spatial_dim, in_filters), (batch_size) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, toAdd, input_deriv);
+	convolutionDerivWeights <<< (in_filters, out_filters), (kern_dim, kern_dim) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv);
+	convolutionDerivBiases <<< (out_filters), (1) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, bias_deriv);
+	
+}
+
 void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, int batch_size, float eps, float * input, float * activated_out){
 	// reading values from batch norm params
 	int filters = batch_norm_params -> depth;
@@ -1465,7 +1630,7 @@ void forward_pass(Train_ResNet * trainer){
 	float * final_conv_block_output = activation_conv_blocks[n_conv_blocks - 1] -> output_activated;
 	float * final_avg_pool_values = trainer -> forward_buffer -> activations -> final_conv_output_pooled;
 
-	// NEED TO DO AVERAGE POOL OF LAST LAYER to go from (7, 7, 2048, batch size) to (1, 1, 2048, batch size)
+	// NEED TO DO AVERAGE POOL OF LAST LAYER to go from (batch_size, 7, 7, 2048) to (batch size, 1, 1, 2048)
 
 	// format of output is each row is a sample and has a row size of 2048
 	doFilterAvgPool <<< (final_filters), (batch_size) >>> (final_conv_block_output, final_spatial_dim, final_avg_pool_values);
@@ -1521,6 +1686,8 @@ void backwards_pass(Train_ResNet * trainer){
 
 	/* STEP 2: FC WEIGHT DERIV AND FINAL AVG POOL (SECOND LAST ACTIVTION LAYER) DERIVATIVE */
 
+	// TODO: MAKE SURE THE DIMENSIONS ARE CORRECT ORDER...
+
 	// FC WEIGHTS (2048, 1000) DERIV = matMul(transpose(final_conv_output_pooled), output_layer_deriv)
 	int final_depth = dims -> final_depth;
 	float * fc_deriv = param_derivs -> fully_connected;
@@ -1549,7 +1716,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 	// get the location for the deriv of final conv block output
 	float * final_conv_block_output_deriv = activation_conv_blocks_derivs[n_conv_blocks - 1] -> output_activated;
-	// using final_avg_pool_deriv (2048, batch_size) to populate final_conv_block_output_deriv (7, 7, 2048, batch_size)
+	// using final_avg_pool_deriv (batch_size, 2048) to populate final_conv_block_output_deriv (batch_size, 7, 7, 2048)
 	// each expanded (prior to pooling) spatial index takes on value of given filter's avg_pool_deriv / (spatial_dim^2)
 	filterAvgPoolDeriv <<< (final_depth), (batch_size) >>> (final_avg_pool_deriv, final_depth, batch_size, final_spatial_dim, final_conv_block_output_deriv);
 
@@ -1577,13 +1744,34 @@ void backwards_pass(Train_ResNet * trainer){
 	BatchNorm *cur_batch_norm_params, *cur_batch_norm_param_derivs;
 	Cache_BatchNorm *cur_batch_norm_cache, *cur_batch_norm_cache_derivs;
 
-	// will update these for every iteration through conv_blocks
+	// will update these every iteration through conv_blocks
 	ConvBlock * cur_conv_block_params, *cur_conv_block_param_derivs;
 	Activation_ConvBlock * cur_conv_block_activation, *cur_conv_block_activation_derivs;
 
-	float * prior_block_output_deriv = final_conv_block_output_deriv;
-	
+	// will update these within every iteration through conv_blocks
+	// because multiple convolutions per block, but keep params same for easy calls to functions
+	int in_spatial_dim, kern_dim, in_filters, out_filters, stride;
+	float *conv_input, *conv_weight, *conv_out_deriv;
+	float *conv_input_deriv, *conv_weight_deriv, *conv_bias_deriv;
+
+
+	// STARTING POINT FROM BACKPROP COMING FROM UPSTREAM LAYERS IS AT LAST CONV BLOCK ACTIVATION -> OUTPUT_ACTIVATED
+	float *conv_block_input, *conv_block_input_deriv;
+
+	// extra temp variables
+	int total_size;
+
 	for (int i = n_conv_blocks - 1; i >= 0; i--){
+
+		// residual deriv and normal backprop deriv added to this
+		if (i == 0){
+			conv_block_input = activations -> init_convblock_input;
+			conv_block_input_deriv = activation_derivs -> init_convblock_input;
+		}
+		else{
+			conv_block_input = activation_conv_blocks[i - 1] -> output_activated;
+			conv_block_input_deriv = activation_conv_blocks_derivs[i - 1] -> output_activated;
+		}
 
 		// getting current conv block parameters and buffers to hold derivs
 		cur_conv_block_params = conv_block_params[i];
@@ -1604,9 +1792,9 @@ void backwards_pass(Train_ResNet * trainer){
 
 		// fill in details about backprop I/O
 		// dL/dBN_Output (given)
-		bn_out_layer_deriv = prior_block_output_deriv;
+		bn_out_layer_deriv = activation_conv_blocks_derivs[i] -> output_activated;
 		// dL/dBN_Input (to fill in)
-		bn_input_deriv = cur_conv_block_activation -> output;
+		bn_input_deriv = cur_conv_block_activation_derivs -> output;
 		// input to batch norm layer from forward pass
 		bn_input = cur_conv_block_activation -> output;
 		// activated output of batch norm layer from forward pass
@@ -1615,23 +1803,178 @@ void backwards_pass(Train_ResNet * trainer){
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
-		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv)
+		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv) */
+
+		/*prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size,
+												float * input, float * weights, float * out_deriv,
+												float * input_deriv, float * weight_deriv, float * bias_deriv)*/
 
 		// check if there is a projection (aka convolution over depth/kern_dim=1 or possibly stride=2/kern_dim=3), otherwise the projection deriv is 1
 		// If there is a projection need to compute derivative of the projection convolution kernel weights and deriv w.r.t. projection convolution input=conv_block_input=prior_block_output_activated
+		if (cur_conv_block_params -> projection){
+
+
+			// CONVOLUTION DIMENSIONS
+			in_spatial_dim = (cur_conv_block_params -> incoming_spatial_dim);
+			out_spatial_dim = (cur_conv_block_params -> incoming_spatial_dim) / (cur_conv_block_params -> stride);
+			in_filters = cur_conv_block_params -> incoming_filters;
+			out_filters = cur_conv_block_params -> expanded_depth;
+			stride = cur_conv_block_params -> stride;
+			if (stride == 2){
+				kern_dim = 3;
+			}
+			else{
+				kern_dim = 1;
+			}
+
+
+			// CONVOLUTION FORWARD DATA
+			// transformed residual convolution input is the value at first step of conv block => activated output from previous block
+			conv_input = conv_block_input;
+			conv_weight = cur_conv_block_params -> projection;
+			// from backprop
+			conv_out_deriv = cur_conv_block_activation_derivs -> output;
+
+			// CONVOLUTION BACKWARDS DERIV DATA BUFFERS
+			// because residual
+			conv_input_deriv = conv_block_input_deriv;
+			conv_weight_deriv = cur_conv_block_param_derivs -> projection;
+			conv_bias_deriv = cur_conv_block_param_derivs -> bias_projection;
+
+			prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
+													conv_input, conv_weight, conv_out_deriv,
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv);
+		}
+		else{
+			total_size = batch_size * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_filters);
+			addVec <<< ceil((float) total_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size, conv_block_input_deriv, cur_conv_block_activation_derivs -> output, conv_block_input_deriv);
+		}
 		
-		// TODO: WRTIE CONVOLUTION DERIVATIVE KERNEL!
 
 		/* 3: Expanded Convolution Derivs */
 
+		// CONVOLUTION DIMENSIONS
+		in_spatial_dim = (cur_conv_block_params -> incoming_spatial_dim) / (cur_conv_block_params -> stride);
+		in_filters = cur_conv_block_params -> reduced_depth;
+		out_filters = cur_conv_block_params -> expanded_depth;
+		stride = 1;
+		kern_dim = 1;
+
+		// CONVOLUTION FORWARD DATA
+		// transformed residual convolution input is the value at first step of conv block => activated output from previous block
+		conv_input = cur_conv_block_activation -> post_spatial_activated;
+		conv_weight = cur_conv_block_params -> depth_expansion;
+		// from backprop
+		conv_out_deriv = cur_conv_block_activation_derivs -> output;
+
+		// CONVOLUTION BACKWARDS DERIV DATA BUFFERS
+		// because residual
+		conv_input_deriv = cur_conv_block_activation_derivs -> post_spatial_activated;
+		conv_weight_deriv = cur_conv_block_param_derivs -> depth_expansion;
+		conv_bias_deriv = cur_conv_block_param_derivs -> bias_depth_expansion;
+
+		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
+													conv_input, conv_weight, conv_out_deriv,
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv);
+
+
 		/* 4: Spatial Convolution Activation and Batch Norm Derivs */
+
+		// update the current batch norm layer pointers
+		cur_batch_norm_params = cur_conv_block_params -> norm_spatial;
+		cur_batch_norm_param_derivs = cur_conv_block_param_derivs -> norm_spatial;
+
+		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_spatial;
+		cur_batch_norm_cache_derivs = cur_conv_block_activation_derivs -> norm_post_spatial;
+
+		// fill in details about backprop I/O
+		// dL/dBN_Output (given)
+		bn_out_layer_deriv = cur_conv_block_activation_derivs -> post_spatial_activated;
+		// dL/dBN_Input (to fill in)
+		bn_input_deriv = cur_conv_block_activation_derivs -> post_spatial;
+		// input to batch norm layer from forward pass
+		bn_input = cur_conv_block_activation -> post_spatial;
+		// activated output of batch norm layer from forward pass
+		bn_activated = cur_conv_block_activation -> post_spatial_activated;
+		
+		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+																						eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
 		/* 5: Spatial Convolution Derivs */
 
+		// CONVOLUTION DIMENSIONS
+		in_spatial_dim = cur_conv_block_params -> incoming_spatial_dim;
+		in_filters = cur_conv_block_params -> reduced_depth;
+		out_filters = cur_conv_block_params -> reduced_depth;
+		stride = cur_conv_block_params -> stride;
+		kern_dim = 3;
+
+		// CONVOLUTION FORWARD DATA
+		// transformed residual convolution input is the value at first step of conv block => activated output from previous block
+		conv_input = cur_conv_block_activation -> post_reduced_activated;
+		conv_weight = cur_conv_block_params -> spatial;
+		// from backprop
+		conv_out_deriv = cur_conv_block_activation_derivs -> post_spatial;
+
+		// CONVOLUTION BACKWARDS DERIV DATA BUFFERS
+		// because residual
+		conv_input_deriv = cur_conv_block_activation_derivs -> post_reduced_activated;
+		conv_weight_deriv = cur_conv_block_param_derivs -> spatial;
+		conv_bias_deriv = cur_conv_block_param_derivs -> bias_spatial;
+
+		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
+													conv_input, conv_weight, conv_out_deriv,
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv);
+
+
 		/* 6: Reduced Convolution Activation and Batch Norm Derivs */
+
+		// update the current batch norm layer pointers
+		cur_batch_norm_params = cur_conv_block_params -> norm_depth_reduction;
+		cur_batch_norm_param_derivs = cur_conv_block_param_derivs -> norm_depth_reduction;
+
+		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_reduced;
+		cur_batch_norm_cache_derivs = cur_conv_block_activation_derivs -> norm_post_reduced;
+
+		// fill in details about backprop I/O
+		// dL/dBN_Output (given)
+		bn_out_layer_deriv = cur_conv_block_activation_derivs -> post_reduced_activated;
+		// dL/dBN_Input (to fill in)
+		bn_input_deriv = cur_conv_block_activation_derivs -> post_reduced;
+		// input to batch norm layer from forward pass
+		bn_input = cur_conv_block_activation -> post_reduced;
+		// activated output of batch norm layer from forward pass
+		bn_activated = cur_conv_block_activation -> post_reduced_activated;
+		
+		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+																						eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
 		/* 7: Reduced Convolution Derivs */
 
+
+		// CONVOLUTION DIMENSIONS
+		in_spatial_dim = cur_conv_block_params -> incoming_spatial_dim;
+		in_filters = cur_conv_block_params -> incoming_filters;
+		out_filters = cur_conv_block_params -> reduced_depth;
+		stride = 1;
+		kern_dim = 1;
+
+		// CONVOLUTION FORWARD DATA
+		// transformed residual convolution input is the value at first step of conv block => activated output from previous block
+		conv_input = conv_block_input;
+		conv_weight = cur_conv_block_params -> depth_reduction;
+		// from backprop
+		conv_out_deriv = cur_conv_block_activation_derivs -> post_reduced;
+
+		// CONVOLUTION BACKWARDS DERIV DATA BUFFERS
+		// because residual
+		conv_input_deriv = conv_block_input_deriv;
+		conv_weight_deriv = cur_conv_block_param_derivs -> depth_reduction;
+		conv_bias_deriv = cur_conv_block_param_derivs -> bias_depth_reduction;
+
+		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, true,
+													conv_input, conv_weight, conv_out_deriv,
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv);
 
 	}
 
