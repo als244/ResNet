@@ -2062,7 +2062,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 	// CONVOLUTION BACKWARDS DERIV DATA BUFFERS
 	// because residual
-	conv_input_deriv = conv_block_input_deriv;
+	conv_input_deriv = NULL;
 	conv_weight_deriv = param_derivs -> init_conv_layer;
 	conv_bias_deriv = param_derivs -> bias_init_conv;
 
