@@ -1413,9 +1413,12 @@ void prepareAndDoConvolution(int in_spatial_dim, int kern_dim, int in_filters, i
 
 void prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, bool toAdd,
 												float * input, float * weights, float * out_deriv,
-												float * input_deriv, float * weight_deriv, float * bias_deriv){
-
-	convolutionDerivInput <<< (in_spatial_dim, in_spatial_dim, in_filters), (batch_size) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, toAdd, input_deriv);
+												float * input_deriv, float * weight_deriv, float * bias_deriv, bool toComputeInputDeriv){
+	
+	// first layer conv doesn't take deriv w.r.t input
+	if (toComputeInputDeriv){
+		convolutionDerivInput <<< (in_spatial_dim, in_spatial_dim, in_filters), (batch_size) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, toAdd, input_deriv);
+	}
 	convolutionDerivWeights <<< (in_filters, out_filters), (kern_dim, kern_dim) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv);
 	convolutionDerivBiases <<< (out_filters), (1) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, bias_deriv);
 	
@@ -1436,10 +1439,6 @@ void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_Batch
 
 	doBatchNormAndActivate<<< filters, 1 >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, normalized_temp_out, normalized_out, activated_out);
 }
-
-activationAndBatchNormDeriv(const float * input, const float * gamma, const float * beta, 
-									int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars, const float * normalized_temp, const float * activated,
-									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * input_deriv)
 
 void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
 																								float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv){
@@ -1828,10 +1827,6 @@ void backwards_pass(Train_ResNet * trainer){
 
 		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv) */
 
-		/*prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size,
-												float * input, float * weights, float * out_deriv,
-												float * input_deriv, float * weight_deriv, float * bias_deriv)*/
-
 		// check if there is a projection (aka convolution over depth/kern_dim=1 or possibly stride=2/kern_dim=3), otherwise the projection deriv is 1
 		// If there is a projection need to compute derivative of the projection convolution kernel weights and deriv w.r.t. projection convolution input=conv_block_input=prior_block_output_activated
 		if (cur_conv_block_params -> projection){
@@ -1866,7 +1861,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 			prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
-													conv_input_deriv, conv_weight_deriv, conv_bias_deriv);
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, true);
 		}
 		else{
 			total_size = batch_size * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_filters);
@@ -1884,7 +1879,6 @@ void backwards_pass(Train_ResNet * trainer){
 		kern_dim = 1;
 
 		// CONVOLUTION FORWARD DATA
-		// transformed residual convolution input is the value at first step of conv block => activated output from previous block
 		conv_input = cur_conv_block_activation -> post_spatial_activated;
 		conv_weight = cur_conv_block_params -> depth_expansion;
 		// from backprop
@@ -1898,7 +1892,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
-													conv_input_deriv, conv_weight_deriv, conv_bias_deriv);
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, true);
 
 
 		/* 4: Spatial Convolution Activation and Batch Norm Derivs */
@@ -1933,7 +1927,6 @@ void backwards_pass(Train_ResNet * trainer){
 		kern_dim = 3;
 
 		// CONVOLUTION FORWARD DATA
-		// transformed residual convolution input is the value at first step of conv block => activated output from previous block
 		conv_input = cur_conv_block_activation -> post_reduced_activated;
 		conv_weight = cur_conv_block_params -> spatial;
 		// from backprop
@@ -1947,7 +1940,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
-													conv_input_deriv, conv_weight_deriv, conv_bias_deriv);
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, true);
 
 
 		/* 6: Reduced Convolution Activation and Batch Norm Derivs */
@@ -1983,7 +1976,6 @@ void backwards_pass(Train_ResNet * trainer){
 		kern_dim = 1;
 
 		// CONVOLUTION FORWARD DATA
-		// transformed residual convolution input is the value at first step of conv block => activated output from previous block
 		conv_input = conv_block_input;
 		conv_weight = cur_conv_block_params -> depth_reduction;
 		// from backprop
@@ -1997,7 +1989,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, true,
 													conv_input, conv_weight, conv_out_deriv,
-													conv_input_deriv, conv_weight_deriv, conv_bias_deriv);
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, true);
 
 	}
 
@@ -2028,10 +2020,55 @@ void backwards_pass(Train_ResNet * trainer){
 	maxPoolDeriv <<< (maxpool_out_spatial_dim, maxpool_out_spatial_dim, maxpool_filters), (batch_size) >>> (max_inds, maxpool_out_deriv, maxpool_kern_dim, maxpool_in_spatial_dim, maxpool_stride, maxpool_filters, batch_size, maxpool_inp_deriv);
 
 
-	/* STEP 6: INIT CONV & BATCH NORM DERIV */
+	/* STEP 6: INIT BATCH NORM & CONV DERIV */
 
+	// BACKPROP OVER THE BATCH NORM OF FIRST CONV LAYER
 
+	// update the current batch norm layer pointers
+	cur_batch_norm_params = model_params -> norm_init_conv;
+	cur_batch_norm_param_derivs = param_derivs -> norm_init_conv;
 
+	cur_batch_norm_cache = activations -> norm_init_conv;
+	cur_batch_norm_cache_derivs = activation_derivs -> norm_init_conv;
+
+	// fill in details about backprop I/O
+	// dL/dBN_Output (given)
+	bn_out_layer_deriv = activation_derivs -> init_conv_activated;
+	// dL/dBN_Input (to fill in)
+	bn_input_deriv = activation_derivs -> init_conv_applied;
+	// input to batch norm layer from forward pass
+	bn_input = activations -> init_conv_applied;
+	// activated output of batch norm layer from forward pass
+	bn_activated = activations -> init_conv_activated;
+		
+	prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+																						eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+
+	// BACKPROP OVER FIRST CONV LAYER
+
+	// CONVOLUTION DIMENSIONS
+	// hardcoded to 3 for the colors
+	in_filters = 3;
+	out_filters = dims -> init_conv_filters;
+	in_spatial_dim = dims -> input;
+	stride = dims -> init_conv_stride;
+	kern_dim = dims -> init_kernel_dim;
+
+	// CONVOLUTION FORWARD DATA
+	conv_input = trainer -> cur_batch -> images;
+	conv_weight = model_params -> init_conv_layer;
+	// from backprop
+	conv_out_deriv = activation_derivs -> init_conv_applied;
+
+	// CONVOLUTION BACKWARDS DERIV DATA BUFFERS
+	// because residual
+	conv_input_deriv = conv_block_input_deriv;
+	conv_weight_deriv = param_derivs -> init_conv_layer;
+	conv_bias_deriv = param_derivs -> bias_init_conv;
+
+	prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
+													conv_input, conv_weight, conv_out_deriv,
+													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, false);
 }	
 
 
