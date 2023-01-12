@@ -131,7 +131,7 @@ __global__ void doConvolution(const float * input, const float * weights, const 
 
 	int spatial_row_start = stride * blockIdx.x;
 	int spatial_col_start = stride * blockIdx.y;
-	int out_spatial_dim = spatial_dim / (stride * stride);
+	int out_spatial_dim = spatial_dim / stride;
 
 	int output_filter_off = threadIdx.x;
 	int half_kernel_dim = kern_dim / 2;
@@ -197,7 +197,7 @@ __global__ void convolutionDerivInput(const float * input, const float * weights
 		return;
 	}
 
-	int out_spatial_dim = spatial_dim / (stride * stride);
+	int out_spatial_dim = spatial_dim / stride;
 	int half_kernel_dim = kern_dim / 2;
 	int out_spatial_row_start = spatial_row / stride;
 	int out_spatial_col_start = spatial_col / stride;
@@ -264,7 +264,7 @@ __global__ void convolutionDerivWeights(const float * input, const float * weigh
 
 	int kernel_size = (kern_dim * kern_dim * in_filters);
 	int half_kernel_dim = kern_dim / 2;
-	int out_spatial_dim = spatial_dim / (stride * stride);
+	int out_spatial_dim = spatial_dim / stride;
 	int in_spatial_row, in_spatial_col, in_spatial_ind, out_spatial_ind;
 	float out_spatial_val_deriv;
 	float total_deriv = 0;
@@ -310,7 +310,7 @@ __global__ void convolutionDerivBiases(const float * input, const float * weight
 		return;
 	}
 
-	int out_spatial_dim = spatial_dim / (stride * stride);
+	int out_spatial_dim = spatial_dim / stride;
 	int out_spatial_ind;
 	float total_deriv = 0;
 	for (int s = 0; s < batch_size; s++){
@@ -506,6 +506,29 @@ __global__ void doMaxPool(const float * input, int kern_dim, int stride, int bat
 		max_inds[out_ind] = max_ind;
 		out[out_ind] = max_val;
 	}
+}
+
+// assume grid launch of (SPATIAL_OUT_DIM, SPATIAL_OUT_DIM, OUT_FILTERS) and block dim of (BATCH_SIZE)
+// max_inds_populated is mapping from max_pool_out_index -> associated max_index of input (populated from forward pass)
+// also assume max_pool_inp_deriv is populated with all 0's to begin with and we overwrite non-zero values
+__global__ void maxPoolDeriv(const float *max_inds_populated, const float *out_deriv, int kern_dim, int in_spatial_dim, int stride, int filters, int batch_size, float * max_pool_inp_deriv){
+
+	int out_spatial_dim = spatial_dim / stride;
+
+	int out_spatial_row = blockIdx.x;
+	int out_spatial_col = blockIdx.y;
+	int out_filter_id = blockIdx.z;
+	int sample_ind = threadIdx.x;
+
+	// based on launch spec should be ok, but check anyways
+	if ((out_spatial_row >= out_spatial_dim) || (out_spatial_col >= out_spatial_dim) || (out_filter_id >= filters) || (sample_ind >= batch_size)){
+		return;
+	}
+
+	int out_ind = out_spatial_dim * out_spatial_dim * filters * sample_ind + out_spatial_dim * filters * out_spatial_row + filters * out_spatial_col + out_filter_id;
+	int max_ind_for_out = max_inds_populated[out_ind];
+
+	max_pool_inp_deriv[max_ind_for_out] = out_deriv[out_ind];
 }
 
 
@@ -1981,8 +2004,28 @@ void backwards_pass(Train_ResNet * trainer){
 
 	/* STEP 5: MAX POOL DERIV */
 
+	// maxpool dimensions (used in forward pass)
+	int maxpool_kern_dim = dims -> init_maxpool_dim;
+	int maxpool_stride = dims -> init_maxpool_stride;
+	int maxpool_in_spatial_dim = dims -> input / dims -> init_conv_stride;
+	int maxpool_out_spatial_dim = maxpool_in_spatial_dim / maxpool_stride;
+	int maxpool_filters = dims -> init_conv_filters;
+
 	// backprop up through the init convblock input has been done. the gradient is at:
-	float * max_pool_out_deriv = activation_derivs -> init_convblock_input;
+	float * maxpool_out_deriv = activation_derivs -> init_convblock_input;
+
+	// getting the max inds cached from forward pass to easily do backprop
+	float * max_inds = activations -> max_inds;
+
+	// populating the gradient of input to max_pool located at:
+	float * maxpool_inp_deriv = activation_derivs -> init_conv_activated;
+	// ensure that gradient has 0's, so that maxPoolDeriv kernel can overwrite only at max ind locations
+	int maxpool_inp_size = maxpool_in_spatial_dim * maxpool_in_spatial_dim * maxpool_filters * batch_size;
+	cudaMemset(maxpool_inp_deriv, 0, maxpool_inp_size * sizeof(float));
+
+
+	// compute max pool deriv (i.e. populate maxpool_inp_deriv)
+	maxPoolDeriv <<< (maxpool_out_spatial_dim, maxpool_out_spatial_dim, maxpool_filters), (batch_size) >>> (max_inds, maxpool_out_deriv, maxpool_kern_dim, maxpool_in_spatial_dim, maxpool_stride, maxpool_filters, batch_size, maxpool_inp_deriv);
 
 
 	/* STEP 6: INIT CONV & BATCH NORM DERIV */
