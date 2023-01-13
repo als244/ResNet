@@ -3,6 +3,8 @@
 #include <time.h>
 #include <math.h>
 #include <cuda.h>
+#include <curand.h>
+#include <cuda_runtime.h>
 #include <stdint.h>
 
 #include "resnet.h"
@@ -17,21 +19,34 @@
 #define MAX_SHARED_MEMORY 48000
 #define MAX_SHARED_MEM_FLOATS 12000
 
-__global__ void sample_gaussian(int size, float *X, float mean, float var) {
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= size){
-		return;
-	}
-	if (var == 0){
-		return mean;
-	}
-	float x = (float)rand() / RAND_MAX;
-  	float y = (float)rand() / RAND_MAX;
-  	float z = sqrtf(-2 * logf(x)) * cosf(2 * M_PI * y);
-  	float std = sqrtf(var);
-  	float val = std * z + mean;
-  	X[i] = val;
-}
+#define CUDA_CALL(x) do { if((x)!=cudaSuccess) { \
+    printf("Error at %s:%d\n",__FILE__,__LINE__);\
+    return EXIT_FAILURE;}} while(0)
+
+// GLOBAL VARIABLE USED TO GENERATE RANDOM NUMBERS from cuRAND library
+ curandGenerator_t gen;
+
+ void init_weights_gaussian_device(int size, float *X, float mean, float var){
+ 	curandGenerateNormal(gen, X, size, mean, sqrt(var));
+ }
+
+// RANDOM NUMBER GENERATOR ON DEVICE CAN'T USE C LIBRARY RAND(), so use cuRAND() library instead...
+// __global__ void sample_gaussian(int size, float *X, float mean, float var) {
+// 	int i = blockIdx.x * blockDim.x + threadIdx.x;
+// 	if (i >= size){
+// 		return;
+// 	}
+// 	if (var == 0){
+// 		X[i] = mean;
+// 		return;
+// 	}
+// 	float x = (float)rand() / RAND_MAX;
+//   	float y = (float)rand() / RAND_MAX;
+//   	float z = sqrtf(-2 * logf(x)) * cosf(2 * M_PI * y);
+//   	float std = sqrtf(var);
+//   	float val = std * z + mean;
+//   	X[i] = val;
+// }
 
 // ASSUME 1-D launch
 __global__ void addVec(int size, float * A, float * B, float * out){
@@ -127,18 +142,17 @@ __global__ void doConvolution(const float * input, const float * weights, const 
 
 
 	// (Calling "Kernel" a 3-D obj of weights where there is 2-D conv filter for each input channel)
-	int kernel_size = (kern_dim * kern_dim * in_filt);
+	int kernel_size = (kern_dim * kern_dim * in_filters);
 
 	int spatial_row_start = stride * blockIdx.x;
 	int spatial_col_start = stride * blockIdx.y;
 	int out_spatial_dim = spatial_dim / stride;
 
-	int output_filter_off = threadIdx.x;
 	int half_kernel_dim = kern_dim / 2;
-	int out_filter_start, out_filter_id, spatial_row, spatial_col;
+	int out_filter_id, spatial_row, spatial_col;
 	float out_val, spatial_val;
 	out_filter_id = blockIdx.z * blockDim.x + threadIdx.x;
-	if (out_filer_id >= out_filters){
+	if (out_filter_id >= out_filters){
 		return;
 	}
 
@@ -149,6 +163,7 @@ __global__ void doConvolution(const float * input, const float * weights, const 
 	int samp_per_subbatch = ceil((float) batch_size / blockDim.y);
 	int samp_start = samp_per_subbatch * threadIdx.y;
 	int samp_end = min(batch_size, samp_start + samp_per_subbatch);
+	int kernel_ind;
 	// probably could be more efficient by reducing number of output filters in shared mem, and adding tiled spatial....
 	for (int sample_ind = samp_start; sample_ind < samp_end; sample_ind++){
 		out_val = 0;
@@ -201,7 +216,7 @@ __global__ void convolutionDerivInput(const float * input, const float * weights
 	int half_kernel_dim = kern_dim / 2;
 	int out_spatial_row_start = spatial_row / stride;
 	int out_spatial_col_start = spatial_col / stride;
-	int kern_ind, out_spatial_ind, kern_row_ind, kern_col_ind;
+	int kern_ind, kern_row_ind, kern_col_ind, out_spatial_ind, out_spatial_row, out_spatial_col;
 	int kernel_size = (kern_dim * kern_dim * in_filters);
 	float out_spatial_val_deriv;
 	float total_deriv = 0;
@@ -306,7 +321,7 @@ __global__ void convolutionDerivBiases(const float * input, const float * weight
 											float * bias_deriv){
 	int out_filter_id = blockIdx.x;
 	// shouldn't need to check based on launch specs, but will anyways...
-	if (out_filer_id >= out_filters){
+	if (out_filter_id >= out_filters){
 		return;
 	}
 
@@ -375,7 +390,7 @@ __global__ void doBatchNormAndActivate(const float * input, const float * gamma,
 				normalized_temp[inp_index] = normalized_temp_val;
 				normalized_val = gamma[filter_id] * normalized_temp_val + beta[filter_id];
 				normalized[inp_index] = normalized_val;
-				acitvated[inp_index] = fmaxf(normalized_val, 0); 
+				activated[inp_index] = fmaxf(normalized_val, 0); 
 			}
 		}
 	}
@@ -399,7 +414,6 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 
 	float n_samples = batch_size * spatial_dim * spatial_dim;
 	float gamma_val = gamma[filter_id];
-	float beta_val = beta[filter_id];
 	float mean_val = means[filter_id];
 	float var_val = vars[filter_id];
 
@@ -468,7 +482,7 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 // assume grid launch of (SPATIAL_OUT_DIM, SPATIAL_OUT_DIM) and block dim of (FILTERS)
 // could parallelize over batches as well, but probably ok. 
 // *runs into issues if #filters greater than threads per block
-__global__ void doMaxPool(const float * input, int kern_dim, int stride, int batch_size, float * max_inds, float * out){
+__global__ void doMaxPool(const float * input, int kern_dim, int stride, int batch_size, int * max_inds, float * out){
 
 	int filter_id = threadIdx.x;
 
@@ -511,9 +525,9 @@ __global__ void doMaxPool(const float * input, int kern_dim, int stride, int bat
 // assume grid launch of (SPATIAL_OUT_DIM, SPATIAL_OUT_DIM, OUT_FILTERS) and block dim of (BATCH_SIZE)
 // max_inds_populated is mapping from max_pool_out_index -> associated max_index of input (populated from forward pass)
 // also assume max_pool_inp_deriv is populated with all 0's to begin with and we overwrite non-zero values
-__global__ void maxPoolDeriv(const float *max_inds_populated, const float *out_deriv, int kern_dim, int in_spatial_dim, int stride, int filters, int batch_size, float * max_pool_inp_deriv){
+__global__ void maxPoolDeriv(const int *max_inds_populated, const float *out_deriv, int kern_dim, int in_spatial_dim, int stride, int filters, int batch_size, float * max_pool_inp_deriv){
 
-	int out_spatial_dim = spatial_dim / stride;
+	int out_spatial_dim = in_spatial_dim / stride;
 
 	int out_spatial_row = blockIdx.x;
 	int out_spatial_col = blockIdx.y;
@@ -690,7 +704,7 @@ __global__ void softMax(const float * X, int batch_size, int output_len, float *
 }
 
 // launch with gridDim = (batch_size), blockDim = (1)
-__global__ void crossEntropyDeriv(float * output_deriv, const float * correct_classes, int output_dim, int batch_size){
+__global__ void crossEntropyDeriv(float * output_deriv, const int * correct_classes, int output_dim, int batch_size){
 	int i = blockIdx.x;
 	if (i < batch_size){
 		output_deriv[i * output_dim + correct_classes[i]] -= 1;
@@ -729,7 +743,8 @@ __global__ void updateParams(int size, float * model_params, const float * means
 
 Dims * init_dimensions(int input, int init_kernel_dim, int init_conv_filters, int init_conv_stride, int init_maxpool_dim, int init_maxpool_stride, 
 							int n_conv_blocks, int * is_block_spatial_reduction, int final_depth, int output){
-	Dims * dims = malloc(sizeof(Dims));
+	
+	Dims * dims = (Dims *) malloc(sizeof(Dims));
 	dims -> input = input;
 	dims -> init_kernel_dim = init_kernel_dim;
 	dims -> init_conv_filters = init_conv_filters;
@@ -740,14 +755,16 @@ Dims * init_dimensions(int input, int init_kernel_dim, int init_conv_filters, in
 	dims -> is_block_spatial_reduction = is_block_spatial_reduction;
 	dims -> final_depth = final_depth;
 	dims -> output = output;
+
+	return dims;
 }
 
 BatchNorm * init_batch_norm(int spatial_dim, int depth, bool is_zero){
-	BatchNorm * batch_norm = malloc(sizeof(BatchNorm));
+	
+	BatchNorm * batch_norm = (BatchNorm *) malloc(sizeof(BatchNorm));
 
 	batch_norm -> spatial_dim = spatial_dim;
 	batch_norm -> depth = depth;
-	batch_norm -> alpha = alpha;
 
 	float * gamma, * beta;
 
@@ -767,8 +784,9 @@ BatchNorm * init_batch_norm(int spatial_dim, int depth, bool is_zero){
 
 }
 
-ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int reduced_depth, int expanded_depth, int stride, float ewma_alpha, bool is_zero){
-	ConvBlock * conv_block = malloc(sizeof(ConvBlock));
+ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int reduced_depth, int expanded_depth, int stride, bool is_zero){
+	
+	ConvBlock * conv_block = (ConvBlock *) malloc(sizeof(ConvBlock));
 	conv_block -> incoming_filters = incoming_filters;
 	conv_block -> incoming_spatial_dim = incoming_spatial_dim;
 	conv_block -> reduced_depth = reduced_depth;
@@ -788,7 +806,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	cudaMalloc(&depth_reduction, depth_reduction_size * sizeof(float));
 	cudaMemset(depth_reduction, 0, depth_reduction_size * sizeof(float));
 	if (!is_zero){
-		sample_gaussian <<< SM_COUNT, ceil((float) (depth_reduction_size) / SM_COUNT) >>> (depth_reduction_size, depth_reduction, 0, 2.0 / depth_reduction_fan_in);
+		init_weights_gaussian_device(depth_reduction_size, depth_reduction, 0, 2.0 / depth_reduction_fan_in);
 	}
 
 	bias_depth_reduction_size = reduced_depth;
@@ -803,7 +821,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	cudaMalloc(&spatial, spatial_size * sizeof(float));
 	cudaMemset(spatial, 0, spatial_size * sizeof(float));
 	if (!is_zero){
-		sample_gaussian <<< SM_COUNT, ceil((float) (spatial_size) / SM_COUNT) >>> (spatial_size, spatial, 0, 2.0 / spatial_fan_in);
+		init_weights_gaussian_device(spatial_size, spatial, 0, 2.0 / spatial_fan_in);
 	}
 
 	bias_spatial_size = reduced_depth;
@@ -821,7 +839,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	cudaMalloc(&depth_expansion, depth_expansion_size * sizeof(float));
 	cudaMemset(depth_expansion, 0, depth_expansion_size * sizeof(float));
 	if (!is_zero){
-		sample_gaussian <<< SM_COUNT, ceil((float) (depth_expansion_size) / SM_COUNT) >>> (depth_expansion_size, depth_expansion, 0, 2.0 / depth_expansion_fan_in);
+		init_weights_gaussian_device(depth_expansion_size, depth_expansion, 0, 2.0 / depth_expansion_fan_in);
 	}
 
 	bias_depth_expansion_size = expanded_depth;
@@ -855,7 +873,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 		cudaMalloc(&projection, projection_size * sizeof(float));
 		cudaMemset(projection, 0, projection_size * sizeof(float));
 		if (!is_zero){
-			sample_gaussian <<< SM_COUNT, ceil((float) (projection_size) / SM_COUNT) >>> (projection_size, projection, 0, 2.0 / incoming_filters);
+			init_weights_gaussian_device(projection_size, projection, 0, 2.0 / incoming_filters);
 		}
 		cudaMalloc(&bias_projection, expanded_depth * sizeof(float));
 		cudaMemset(bias_projection, 0, expanded_depth * sizeof(float));
@@ -877,7 +895,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 
 Params * init_model_parameters(Dims * model_dims, bool is_zero){
 
-	Params * params = malloc(sizeof(Params));
+	Params * params = (Params *) malloc(sizeof(Params));
 
 	// dimensions unpacked
 	int input_dim = model_dims -> input;
@@ -893,8 +911,8 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 	int n_locations = 13 + 12 * n_conv_blocks;
 	params -> n_locations = n_locations;
 
-	float ** locations = malloc(n_locations * sizeof(float *));
-	int * sizes = malloc(n_locations * sizeof(int));
+	float ** locations = (float **) malloc(n_locations * sizeof(float *));
+	int * sizes = (int *) malloc(n_locations * sizeof(int));
 	// tracking location ind as we start allocating...
 	
 
@@ -906,7 +924,7 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 	cudaMalloc(&init_conv_layer,  init_conv_size * sizeof(float));
 	cudaMemset(init_conv_layer, 0, init_conv_size * sizeof(float));
 	if (!is_zero){
-		sample_gaussian <<< SM_COUNT, ceil((float) (init_conv_size) / SM_COUNT) >>> (init_conv_size, init_conv_layer, 0, 2.0 / init_conv_fan_in);
+		init_weights_gaussian_device(init_conv_size, init_conv_layer, 0, 2.0 / init_conv_fan_in);
 	}
 	params -> init_conv_layer = init_conv_layer;
 
@@ -938,7 +956,7 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 	
 
 	// init conv blocks
-	ConvBlock ** conv_blocks = malloc(n_conv_blocks * sizeof(ConvBlock *));
+	ConvBlock ** conv_blocks = (ConvBlock **) malloc(n_conv_blocks * sizeof(ConvBlock *));
 	int incoming_filters = init_conv_filters;
 	// assume stride 2 initial conv layer then stride 2 pool before entering conv_blocks
 	int incoming_spatial_dim = input_dim / 4;
@@ -954,7 +972,7 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 		else{
 			stride = 1;
 		}
-		conv_blocks[i] = init_conv_block(incoming_filters, incoming_spatial_dim, reduced_depth, expanded_depth, stride);
+		conv_blocks[i] = init_conv_block(incoming_filters, incoming_spatial_dim, reduced_depth, expanded_depth, stride, false);
 		locations[loc_ind] = conv_blocks[i] -> depth_reduction;
 		sizes[loc_ind] = incoming_filters * reduced_depth;
 		loc_ind++;
@@ -1027,7 +1045,7 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 	cudaMalloc(&fully_connected, fully_connected_size * sizeof(float));
 	cudaMemset(fully_connected, 0, fully_connected_size * sizeof(float));
 	if (!is_zero){
-		sample_gaussian <<< SM_COUNT, ceil((float) (fully_connected_size) / SM_COUNT) >>> (fully_connected_size, fully_connected, 0, 2.0 / fully_connected_fan_in);
+		init_weights_gaussian_device(fully_connected_size, fully_connected, 0, 2.0 / fully_connected_fan_in);
 	}
 
 	params -> fully_connected = fully_connected;
@@ -1041,9 +1059,9 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 }
 
 ResNet * init_resnet(Dims * dims){
-	ResNet * model = malloc(sizeof(ResNet));
+	ResNet * model = (ResNet *) malloc(sizeof(ResNet));
 	model -> dims = dims;
-	Parms * params = init_model_parameters(dims, false);
+	Params * params = init_model_parameters(dims, false);
 	model -> params = params;
 	return model;
 }
@@ -1052,7 +1070,7 @@ ResNet * init_resnet(Dims * dims){
 /* INITIALIZE TRAINING STRUCTURES */
 
 Cache_BatchNorm * init_cache_batchnorm(int input_size, int feature_size){
-	Cache_BatchNorm * cache_batchnorm = malloc(sizeof(Cache_BatchNorm));
+	Cache_BatchNorm * cache_batchnorm = (Cache_BatchNorm *) malloc(sizeof(Cache_BatchNorm));
 
 	cache_batchnorm -> input_size = input_size;
 	cache_batchnorm -> feature_size = feature_size;
@@ -1073,13 +1091,19 @@ Cache_BatchNorm * init_cache_batchnorm(int input_size, int feature_size){
 }
 
 Activation_ConvBlock * init_activation_convblock(ConvBlock * conv_block, int batch_size){
-	Activation_ConvBlock * activation_conv_block = malloc(sizeof(Activation_ConvBlock));
+	Activation_ConvBlock * activation_conv_block = (Activation_ConvBlock *) malloc(sizeof(Activation_ConvBlock));
 
-	activation_conv_block -> incoming_filters = conv_block -> incoming_filters;
-	activation_conv_block -> incoming_spatial_dim = conv_block -> incoming_spatial_dim;
-	activation_conv_block -> reduced_depth = conv_block -> reduced_depth;
-	activation_conv_block -> expanded_depth = conv_block -> expanded_depth;
-	activation_conv_block -> stride = conv_block -> stride;
+	int incoming_filters = conv_block -> incoming_filters;
+	int incoming_spatial_dim = conv_block -> incoming_spatial_dim;
+	int stride = conv_block -> stride;
+	int reduced_depth = conv_block -> reduced_depth;
+	int expanded_depth = conv_block -> expanded_depth;
+
+	activation_conv_block -> incoming_filters = incoming_filters;
+	activation_conv_block -> incoming_spatial_dim = incoming_spatial_dim;
+	activation_conv_block -> reduced_depth = reduced_depth;
+	activation_conv_block -> expanded_depth = expanded_depth;
+	activation_conv_block -> stride = stride;
 
 	float * post_reduced, *post_spatial, *post_expanded, *transformed_residual, *output, *output_activated;
 	float * post_reduced_activated, *post_spatial_activated;
@@ -1133,7 +1157,7 @@ Activation_ConvBlock * init_activation_convblock(ConvBlock * conv_block, int bat
 
 Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_size){
 	
-	Activations * activations = malloc(sizeof(Activations));
+	Activations * activations = (Activations *) malloc(sizeof(Activations));
 
 	int input_dim = dims -> input;
 	int init_conv_filters = dims -> init_conv_filters;
@@ -1141,7 +1165,7 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 	int maxpool_stride = dims -> init_maxpool_stride;
 
 	float * init_conv_applied;
-	int init_conv_applied_size = init_conv_filters * input_dim * input_dim / (init_stride * init_stride) * batch_size; 
+	int init_conv_applied_size = init_conv_filters * input_dim * input_dim / (init_conv_stride * init_conv_stride) * batch_size; 
 	cudaMalloc(&init_conv_applied, init_conv_applied_size * sizeof(float));
 	activations -> init_conv_applied = init_conv_applied;
 
@@ -1150,9 +1174,9 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 
 	float * init_conv_activated;
 	cudaMalloc(&init_conv_activated, init_conv_applied_size * sizeof(float));
-	activation -> init_conv_activated = init_conv_activated;
+	activations -> init_conv_activated = init_conv_activated;
 
-	int init_convblock_input_size = init_conv_filters * input_dim * input_dim / (init_stride * init_stride) / (maxpool_stride * maxpool_stride) * batch_size;
+	int init_convblock_input_size = init_conv_filters * input_dim * input_dim / (init_conv_stride * init_conv_stride) / (maxpool_stride * maxpool_stride) * batch_size;
 
 	int * max_inds;
 	cudaMalloc(&max_inds, init_convblock_input_size * sizeof(int));
@@ -1164,7 +1188,7 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 
 	int n_conv_blocks = dims -> n_conv_blocks;
 
-	Activation_ConvBlock ** activation_conv_blocks = malloc(n_conv_blocks * sizeof(Activation_ConvBlock *));
+	Activation_ConvBlock ** activation_conv_blocks = (Activation_ConvBlock **) malloc(n_conv_blocks * sizeof(Activation_ConvBlock *));
 	for (int i = 0; i < n_conv_blocks; i++){
 		ConvBlock * conv_block = conv_blocks[i];
 		activation_conv_blocks[i] = init_activation_convblock(conv_block, batch_size);
@@ -1183,7 +1207,7 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 	int output_size = output_dim * batch_size;
 
 	float * linear_output;
-	cudaMalloc(&output, output_size * sizeof(float));
+	cudaMalloc(&linear_output, output_size * sizeof(float));
 	activations -> linear_output = linear_output;
 
 	return activations;
@@ -1192,7 +1216,7 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 
 Forward_Buffer * init_forward_buffer(Dims * dims, ConvBlock ** conv_blocks, int batch_size){
 
-	Forward_Buffer * forward_buffer = malloc(sizeof(Forward_Buffer));
+	Forward_Buffer * forward_buffer = (Forward_Buffer *) malloc(sizeof(Forward_Buffer));
 
 	forward_buffer -> activations = init_activations(dims, conv_blocks, batch_size);
 
@@ -1204,7 +1228,7 @@ Forward_Buffer * init_forward_buffer(Dims * dims, ConvBlock ** conv_blocks, int 
 	forward_buffer -> pred = pred;
 
 	// will be copied to cpu to be able to print values and compute loss on cpu side
-	float * pred_cpu = malloc(output_size * batch_size * sizeof(float));
+	float * pred_cpu = (float *) malloc(output_size * batch_size * sizeof(float));
 	forward_buffer -> pred_cpu = pred_cpu;
 
 	return forward_buffer;
@@ -1213,7 +1237,7 @@ Forward_Buffer * init_forward_buffer(Dims * dims, ConvBlock ** conv_blocks, int 
 
 Backprop_Buffer * init_backprop_buffer(Dims * dims, ConvBlock ** conv_blocks, int batch_size){
 
-	Backprop_Buffer * backprop_buffer = malloc(sizeof(Backprop_Buffer));
+	Backprop_Buffer * backprop_buffer = (Backprop_Buffer *) malloc(sizeof(Backprop_Buffer));
 
 	int output_dim = dims -> output;
 	int output_size = output_dim * batch_size;
@@ -1232,7 +1256,7 @@ Backprop_Buffer * init_backprop_buffer(Dims * dims, ConvBlock ** conv_blocks, in
 
 
 Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, float learning_rate, float mean_decay, float var_decay, float eps, int n_epochs){
-	Train_ResNet * trainer = malloc(sizeof(Train_ResNet));
+	Train_ResNet * trainer = (Train_ResNet *) malloc(sizeof(Train_ResNet));
 
 	trainer -> model = model;
 
@@ -1253,22 +1277,22 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 
 	trainer -> n_epochs = n_epochs;
 
-	trainer -> loss_per_epoch = calloc(n_epochs * sizeof(float));
-	trainer -> accuracy_per_epoch = calloc(n_epochs * sizeof(float));
+	trainer -> loss_per_epoch = (float *) calloc(n_epochs, sizeof(float));
+	trainer -> accuracy_per_epoch = (float *) calloc(n_epochs, sizeof(float));
 
 	return trainer;
 }
 
 Batch * init_general_batch(int n_images, int image_size, int image_dim){
-	Batch * batch = malloc(sizeof(Batch));
+	Batch * batch = (Batch *) malloc(sizeof(Batch));
 
 	batch -> n_images = n_images;
 	// in resnet-50 will be 224 * 224 * 3
 	batch -> image_size = image_size;
 	batch -> image_dim = image_dim;
 	// load batch by first brining into cpu
-	batch -> images_cpu = malloc(n_images * image_size * sizeof(uint8_t));
-	batch -> images_float_cpu = malloc(n_images * image_size * sizeof(float));
+	batch -> images_cpu = (uint8_t *) malloc(n_images * image_size * sizeof(uint8_t));
+	batch -> images_float_cpu = (float *) malloc(n_images * image_size * sizeof(float));
 
 	// allocate memory on gpu so that after loaded on cpu can bring in
 	// will be converting from uint8 on CPU to float on GPU
@@ -1276,9 +1300,9 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim){
 	cudaMalloc(&images, n_images * image_size * sizeof(float));
 	batch -> images = images;
 
-	batch -> correct_classes_cpu = malloc(n_images * sizeof(int));
+	batch -> correct_classes_cpu = (int *) malloc(n_images * sizeof(int));
 
-	float * correct_classes;
+	int * correct_classes;
 	cudaMalloc(&correct_classes, n_images * sizeof(int));
 	batch -> correct_classes = correct_classes;
 
@@ -1286,7 +1310,7 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim){
 }
 
 // (if this takes too long, can do it in parallel with separate process on cpu)
-void * load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
+void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	int batch_size = batch_buffer -> n_images;
 	int image_size = batch_buffer -> image_size;
 	int total_pixels = batch_size * image_size;
@@ -1328,8 +1352,43 @@ void * load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 
 
 // READ CLASSES AND LABELS!
+// reading a text file line by line into a buffer
+// pre-allocate buffer and specify type
+void text_file_to_buffer(void * buffer, char * filename, const char * type){
+
+	char ** my_text_buffer = (char **) buffer;
+	int * my_int_buffer = (int *) buffer;
+	
+	FILE * fp;
+    char * line = NULL;
+    size_t len = 0;
+
+    fp = fopen(filename, "r");
+    if (fp == NULL)
+        exit(EXIT_FAILURE);
+    int cnt = 0;
+    while (getline(&line, &len, fp) != -1) {
+    	if (strcmp(type, "TEXT") == 0){
+        	my_text_buffer[cnt] = strdup(line);
+        }
+        else if (strcmp(type, "INT") == 0){
+        	my_int_buffer[cnt] = atoi(line);
+        }
+        else{
+        	// pass
+        }
+        cnt++;
+    }
+
+    fclose(fp);
+    if (line){
+    	free(line);
+    }
+}
+
 Class_Metadata * populate_class_info(char * label_filename, char * synset_filename, char * class_size_filename, int n_classes){
-	Class_Metadata classes = malloc(sizeof(Class_Metadata));
+	
+	Class_Metadata * classes = (Class_Metadata *) malloc(sizeof(Class_Metadata));
 
 	char ** labels = (char **) malloc(n_classes * sizeof(char *));
 	char ** synsets = (char **) malloc(n_classes * sizeof(char *));
@@ -1348,57 +1407,15 @@ Class_Metadata * populate_class_info(char * label_filename, char * synset_filena
 }
 
 
-// reading a text file line by line into a buffer
-// pre-allocate buffer and specify type
-void text_file_to_buffer(void * buffer, char * filename, const char * type){
-
-	if (strcmp(type, "TEXT") == 0){
-        char ** my_buffer = (char **) buffer;
-    }
-    else if (strcmp(type, "INT") == 0){
-        int * my_buffer = (int *) buffer;
-    }
-    else{
-    	// unknown type...
-    	void * my_buffer = buffer;
-    }
-
-
-	FILE * fp;
-    char * line = NULL;
-    size_t len = 0;
-    ssize_t read;
-
-    fp = fopen(filename, "r");
-    if (fp == NULL)
-        exit(EXIT_FAILURE);
-    int cnt = 0;
-    while ((read = getline(&line, &len, fp)) != -1) {
-    	if (strcmp(type, "TEXT") == 0){
-        	my_buffer[cnt] = strdup(line);
-        }
-        else if (strcmp(type, "INT") == 0){
-        	my_buffer[cnt] = atoi(line);
-        }
-        else{
-        	// pass
-        }
-        cnt++;
-    }
-
-    fclose(fp);
-    if (line){
-    	free(line);
-    }
-}
+/* PREP AND LAUNCHING CUDA KERNELS! */
 
 
 void prepareAndDoConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_filters,  int stride, int batch_size, 
 																float * input, float * weights, float * biases, float * output){
 
 	int out_filter_row_size = kern_dim * kern_dim * in_filters;
-	int max_out_filter_rows = MAX_SHARED_MEM_FLOATS / outfilter_row_size;
-	int out_filter_chunks = ceil((float) out_filters / max_outfilter_rows);
+	int max_out_filter_rows = MAX_SHARED_MEM_FLOATS / out_filter_row_size;
+	int out_filter_chunks = ceil((float) out_filters / max_out_filter_rows);
 	int shared_mem_size = out_filter_row_size * max_out_filter_rows;
 	int out_spatial_dim = in_spatial_dim / stride;
 	int max_subatch_size = MAX_THREAD_PER_BLOCK / max_out_filter_rows;
@@ -1416,11 +1433,17 @@ void prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filter
 												float * input_deriv, float * weight_deriv, float * bias_deriv, bool toComputeInputDeriv){
 	
 	// first layer conv doesn't take deriv w.r.t input
+	dim3 gridDimDerivInput(in_spatial_dim, in_spatial_dim, in_filters);
+	dim3 blockDimDerivInput(batch_size);
 	if (toComputeInputDeriv){
-		convolutionDerivInput <<< (in_spatial_dim, in_spatial_dim, in_filters), (batch_size) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, toAdd, input_deriv);
+		convolutionDerivInput <<< gridDimDerivInput, blockDimDerivInput >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, toAdd, input_deriv);
 	}
-	convolutionDerivWeights <<< (in_filters, out_filters), (kern_dim, kern_dim) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv);
-	convolutionDerivBiases <<< (out_filters), (1) >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, bias_deriv);
+
+	dim3 gridDimDerivWeights(in_filters, out_filters);
+	dim3 blockDimDerivWeights(kern_dim, kern_dim);
+	convolutionDerivWeights <<< gridDimDerivWeights, blockDimDerivWeights >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv);
+
+	convolutionDerivBiases <<< out_filters, 1 >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, bias_deriv);
 	
 }
 
@@ -1441,20 +1464,20 @@ void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_Batch
 }
 
 void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
-																								float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv){
+																								int batch_size, float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv){
 	int filters = batch_norm_params -> depth;
 	int spatial_dim = batch_norm_params -> spatial_dim;
 	float * gamma = batch_norm_params -> gamma;
 	float * beta = batch_norm_params -> beta;
-	float * means = batch_norm_params -> means;
-	float * vars = batch_norm_params -> vars;
+	float * means = batch_norm_cache -> means;
+	float * vars = batch_norm_cache -> vars;
 	float * normalized_temp = batch_norm_cache -> normalized_temp;
 
 	float * normalized_temp_deriv = batch_norm_cache_derivs -> normalized_temp;
 	float * gamma_deriv = batch_norm_param_derivs -> gamma;
 	float * beta_deriv = batch_norm_param_derivs -> beta;
 
-	activationAndBatchNormDeriv <<< (filters), (1) >>> (input, gamma, beta, spatial_dim, filters, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv);
+	activationAndBatchNormDeriv <<< (filters), (1) >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv);
 
 
 }
@@ -1462,16 +1485,26 @@ void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cach
 void prepareAndDoMatMulLeftTranspose(const float * left_orig, const float * right, int left_orig_rows, int left_orig_cols, int right_rows, int right_cols, float * out){
 	float * temp_left;
 	cudaMalloc(&temp_left, left_orig_rows * left_orig_cols * sizeof(float));
-	transpose <<< (left_orig_rows / TILE_WIDTH, left_orig_cols / TILE_WIDTH), (TILE_WIDTH * BLOCK_ROWS) >>> (left_orig, left_orig_rows, left_orig_cols, temp_left);
-	matMul <<< (left_orig_cols / TILE_WIDTH, right_cols / TILE_WIDTH), (TILE_WIDTH, TILE_WIDTH) >>> (temp_left, right, left_orig_cols, right_rows, right_cols, out);
+
+	dim3 gridDimTranspose(ceil((float) left_orig_rows / TILE_WIDTH), ceil((float)left_orig_cols / TILE_WIDTH));
+	transpose <<< gridDimTranspose, TILE_WIDTH * BLOCK_ROWS >>> (left_orig, left_orig_rows, left_orig_cols, temp_left);
+
+	dim3 gridDimMatMul(ceil((float) left_orig_cols / TILE_WIDTH), ceil((float) right_cols / TILE_WIDTH));
+	dim3 blockDimMatMul(TILE_WIDTH, TILE_WIDTH);
+	matMul <<< gridDimMatMul, blockDimMatMul >>> (temp_left, right, left_orig_cols, right_rows, right_cols, out);
 	cudaFree(temp_left);
 }
 
 void prepareAndDoMatMulRightTranspose(const float * left, const float * right_orig, int left_rows, int left_cols, int right_orig_rows, int right_orig_cols, float * out){
 	float * temp_right;
 	cudaMalloc(&temp_right, right_orig_rows * right_orig_cols * sizeof(float));
-	transpose <<< (right_orig_rows / TILE_WIDTH, right_orig_cols / TILE_WIDTH), (TILE_WIDTH * BLOCK_ROWS) >>> (right_orig, right_orig_rows, right_orig_cols, temp_right);
-	matMul <<< (left_rows / TILE_WIDTH, right_orig_rows / TILE_WIDTH), (TILE_WIDTH, TILE_WIDTH) >>> (left, temp_right, left_rows, left_cols, right_orig_rows, out);
+	
+	dim3 gridDimTranspose(ceil((float) right_orig_rows / TILE_WIDTH), ceil((float)right_orig_cols / TILE_WIDTH));
+	transpose <<< gridDimTranspose, TILE_WIDTH * BLOCK_ROWS >>> (right_orig, right_orig_rows, right_orig_cols, temp_right);
+	
+	dim3 gridDimMatMul(ceil((float) left_rows / TILE_WIDTH), ceil((float) right_orig_rows / TILE_WIDTH));
+	dim3 blockDimMatMul(TILE_WIDTH, TILE_WIDTH);
+	matMul <<< gridDimMatMul, blockDimMatMul >>> (left, temp_right, left_rows, left_cols, right_orig_rows, out);
 	cudaFree(temp_right);
 }
 
@@ -1509,8 +1542,10 @@ void forward_pass(Train_ResNet * trainer){
 	int init_maxpool_stride = dims -> init_maxpool_stride;
 	int init_maxpool_out_dim = init_out_spatial_dim / init_maxpool_stride;
 	float * init_convblock_input = trainer -> forward_buffer -> activations -> init_convblock_input;
-	float * max_ind_buff = trainer -> forward_buffer -> activations -> max_inds;
-	doMaxPool <<< (init_maxpool_out_dim, init_maxpool_out_dim) , init_out_filters >>> (init_activated, init_maxpool_dim, init_maxpool_stride, batch_size, max_ind_buff, init_convblock_input);
+	int * max_ind_buff = trainer -> forward_buffer -> activations -> max_inds;
+
+	dim3 gridDimMaxPool(init_maxpool_out_dim, init_maxpool_out_dim);
+	doMaxPool <<< gridDimMaxPool , init_out_filters >>> (init_activated, init_maxpool_dim, init_maxpool_stride, batch_size, max_ind_buff, init_convblock_input);
 
 
 	/* NOW CAN MOVE ONTO TO CONV_BLOCK LAYERS! */
@@ -1550,7 +1585,7 @@ void forward_pass(Train_ResNet * trainer){
 
 		norm_input = conv_output;
 		cur_batch_norm_params = cur_conv_block_params -> norm_depth_reduction;
-		cur_batch_norm_cache = cur_conv_block_params -> norm_post_reduced;
+		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_reduced;
 		norm_output = cur_conv_block_activation -> post_reduced_activated;
 
 		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output);
@@ -1634,7 +1669,7 @@ void forward_pass(Train_ResNet * trainer){
 		}
 
 		// add identity residual connection (or projected residual connection) to the prior convolutional output
-		addVec <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size, conv_output, transformed_residual, conv_block_output);
+		addVec <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size_conv_block_output, conv_output, transformed_residual, conv_block_output);
 
 		norm_input = conv_block_output;
 		cur_batch_norm_params = cur_conv_block_params -> norm_residual_added;
@@ -1700,7 +1735,7 @@ void backwards_pass(Train_ResNet * trainer){
 	// End of network was: fully connected layer -> softmax
 	// Derivative of cross entropy loss w.r.t to fully connected values is: s - y where s is softmax value
 	// thus copy softmax values and subtract 1 from the correct index (we know labels y are 0 except correct label of 1)
-	float * correct_classes = trainer -> cur_batch -> correct_classes;
+	int * correct_classes = trainer -> cur_batch -> correct_classes;
 	float * pred = trainer -> forward_buffer -> pred;
 	float * output_layer_deriv = backprop_buffer -> output_layer_deriv;
 	cudaMemcpy(output_layer_deriv, pred, batch_size * output_dim * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -1823,7 +1858,7 @@ void backwards_pass(Train_ResNet * trainer){
 		bn_activated = cur_conv_block_activation -> output_activated;
 		
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
 		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv) */
 
@@ -1834,7 +1869,6 @@ void backwards_pass(Train_ResNet * trainer){
 
 			// CONVOLUTION DIMENSIONS
 			in_spatial_dim = (cur_conv_block_params -> incoming_spatial_dim);
-			out_spatial_dim = (cur_conv_block_params -> incoming_spatial_dim) / (cur_conv_block_params -> stride);
 			in_filters = cur_conv_block_params -> incoming_filters;
 			out_filters = cur_conv_block_params -> expanded_depth;
 			stride = cur_conv_block_params -> stride;
@@ -1915,7 +1949,7 @@ void backwards_pass(Train_ResNet * trainer){
 		bn_activated = cur_conv_block_activation -> post_spatial_activated;
 		
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
 		/* 5: Spatial Convolution Derivs */
 
@@ -1963,7 +1997,7 @@ void backwards_pass(Train_ResNet * trainer){
 		bn_activated = cur_conv_block_activation -> post_reduced_activated;
 		
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
 		/* 7: Reduced Convolution Derivs */
 
@@ -2007,7 +2041,7 @@ void backwards_pass(Train_ResNet * trainer){
 	float * maxpool_out_deriv = activation_derivs -> init_convblock_input;
 
 	// getting the max inds cached from forward pass to easily do backprop
-	float * max_inds = activations -> max_inds;
+	int * max_inds = activations -> max_inds;
 
 	// populating the gradient of input to max_pool located at:
 	float * maxpool_inp_deriv = activation_derivs -> init_conv_activated;
@@ -2015,9 +2049,11 @@ void backwards_pass(Train_ResNet * trainer){
 	int maxpool_inp_size = maxpool_in_spatial_dim * maxpool_in_spatial_dim * maxpool_filters * batch_size;
 	cudaMemset(maxpool_inp_deriv, 0, maxpool_inp_size * sizeof(float));
 
+	dim3 gridDimMaxPoolDeriv(maxpool_out_spatial_dim, maxpool_out_spatial_dim, maxpool_filters);
+	dim3 blockDimMaxPoolDeriv(batch_size);
 
 	// compute max pool deriv (i.e. populate maxpool_inp_deriv)
-	maxPoolDeriv <<< (maxpool_out_spatial_dim, maxpool_out_spatial_dim, maxpool_filters), (batch_size) >>> (max_inds, maxpool_out_deriv, maxpool_kern_dim, maxpool_in_spatial_dim, maxpool_stride, maxpool_filters, batch_size, maxpool_inp_deriv);
+	maxPoolDeriv <<< gridDimMaxPoolDeriv, blockDimMaxPoolDeriv >>> (max_inds, maxpool_out_deriv, maxpool_kern_dim, maxpool_in_spatial_dim, maxpool_stride, maxpool_filters, batch_size, maxpool_inp_deriv);
 
 
 	/* STEP 6: INIT BATCH NORM & CONV DERIV */
@@ -2042,7 +2078,7 @@ void backwards_pass(Train_ResNet * trainer){
 	bn_activated = activations -> init_conv_activated;
 		
 	prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
 	// BACKPROP OVER FIRST CONV LAYER
 
@@ -2123,12 +2159,12 @@ void update_parameters(Train_ResNet * trainer){
 
 int main(int argc, char *argv[]) {
 
-	char * N_CLASSES = 1000;
+	int N_CLASSES = 1000;
 	
 	// GETTING CLASS METADETA
-	char * LABEL_FILENAME = "/mnt/storage/data/vision/imagenet/2012/id_to_label_mapping.txt";
-	char * SYNSET_FILENAME = "/mnt/storage/data/vision/imagenet/2012/id_to_synset_mapping.txt";
-	char * COUNTS_FILENAME = "/mnt/storage/data/vision/imagenet/2012/id_to_img_count_mapping.txt";
+	char * LABEL_FILENAME = (char *) "/mnt/storage/data/vision/imagenet/2012/id_to_label_mapping.txt";
+	char * SYNSET_FILENAME = (char *) "/mnt/storage/data/vision/imagenet/2012/id_to_synset_mapping.txt";
+	char * COUNTS_FILENAME = (char *) "/mnt/storage/data/vision/imagenet/2012/id_to_img_count_mapping.txt";
 	Class_Metadata * class_metadata = populate_class_info(LABEL_FILENAME, SYNSET_FILENAME, COUNTS_FILENAME, N_CLASSES);
 	int total_images = 0;
 	for (int i = 0; i < N_CLASSES; i++){
@@ -2143,7 +2179,7 @@ int main(int argc, char *argv[]) {
 	int INIT_MAXPOOL_DIM = 3;
 	int INIT_MAXPOOL_STRIDE = 2;
 	int N_CONV_BLOCKS = 16;
-	int * IS_BLOCK_SPATIAL_REDUCTION = calloc(N_CONV_BLOCKS * sizeof(int));
+	int * IS_BLOCK_SPATIAL_REDUCTION = (int *) calloc(N_CONV_BLOCKS, sizeof(int));
 	// transitions between spatial 56 -> 28 -> 14 -> 7
 	// transitions between output depth of 256 -> 512 -> 1024 -> 2048
 	int FINAL_DEPTH = 2048;
@@ -2152,6 +2188,10 @@ int main(int argc, char *argv[]) {
 	IS_BLOCK_SPATIAL_REDUCTION[13] = 1;
 	Dims * dims = init_dimensions(INPUT_DIM, INIT_KERNEL_DIM, INIT_CONV_FILTERS, INIT_CONV_STRIDE, INIT_MAXPOOL_DIM, INIT_MAXPOOL_STRIDE,
 									N_CONV_BLOCKS, IS_BLOCK_SPATIAL_REDUCTION, FINAL_DEPTH, N_CLASSES);
+
+	// INITIALIZING RANDOM NUMBER GENERATOR USED TO INIT WEIGHTS
+	curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+	curandSetPseudoRandomGeneratorSeed(gen, 124ULL);
 
 	// INITIALIZING MODEL
 	ResNet * model = init_resnet(dims);
@@ -2163,7 +2203,7 @@ int main(int argc, char *argv[]) {
 	int BATCH_SIZE = 1;
 	// dimensions of INPUT_DIM X INPUT_DIM x 3 color channels
 	int IMAGE_SIZE = INPUT_DIM * INPUT_DIM * 3;
-	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE);
+	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE, INPUT_DIM);
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
@@ -2181,7 +2221,8 @@ int main(int argc, char *argv[]) {
 
 	int iterations_per_epoch = ceil((float) total_images / BATCH_SIZE);
 
-	float *pred, *correct;
+	float *pred;
+	int * correct;
 	float epoch_n_wrong, batch_n_wrong;
 	float epoch_loss, batch_loss, avg_batch_loss, epoch_accuracy, batch_accuracy, val_pred_correct;
 	float total_images_per_epoch = BATCH_SIZE * iterations_per_epoch;
@@ -2234,7 +2275,7 @@ int main(int argc, char *argv[]) {
 			batch_accuracy = ((float) BATCH_SIZE - batch_n_wrong) / ((float) BATCH_SIZE);
 
 			if (iter % PRINT_FREQ == 0){
-				printf("Epoch: %d, Batch: %d ----- Avg. Loss: %d, Accuracy: %d\n", epoch, iter, avg_batch_loss, batch_accuracy);
+				printf("Epoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.4f\n", epoch, iter, avg_batch_loss, batch_accuracy);
 			}
 
 
