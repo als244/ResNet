@@ -32,6 +32,12 @@ typedef struct {
 	int output;
 } Dims;
 
+typedef struct{
+	int spatial_dim;
+	int depth;
+	float * gamma;
+	float * beta;
+} BatchNorm;
 
 // will serve as data for sequence of 1x1, 3x3, then 1x1 filters
 typedef struct {
@@ -70,12 +76,7 @@ typedef struct {
 	BatchNorm * norm_residual_added;
 } ConvBlock;
 
-typedef struct{
-	int spatial_dim;
-	int depth;
-	float * gamma;
-	float * beta;
-} BatchNorm;
+
 
 typedef struct{
 	// initial 7x7 kernels
@@ -89,6 +90,15 @@ typedef struct{
 	int * sizes;
 	int n_locations;
 } Params;
+
+typedef struct{
+	int input_size;
+	int feature_size;
+	float * means;
+	float * vars;
+	float * normalized_temp;
+	float * normalized;
+} Cache_BatchNorm;
 
 typedef struct {
 	int incoming_filters;
@@ -122,14 +132,7 @@ typedef struct {
 	float *output_activated;
 } Activation_ConvBlock;
 
-typedef struct{
-	int input_size;
-	int feature_size;
-	float * means;
-	float * vars;
-	float * normalized_temp;
-	float * normalized;
-} Cache_BatchNorm;
+
 
 typedef struct{
 	// after initial 7x7 kernel and adding bias
@@ -170,6 +173,17 @@ typedef struct{
 	Activations * activation_derivs;
 } Backprop_Buffer;
 
+typedef struct{
+	int image_dim;
+	int image_size;
+	int n_images;
+	uint8_t * images_cpu;
+	float * images_float_cpu;
+	float * images;
+	int * correct_classes_cpu;
+	int * correct_classes;
+} Batch;
+
 
 typedef struct {
 	ResNet * model;
@@ -188,14 +202,5 @@ typedef struct {
 	float * accuracy_per_epoch;
 } Train_ResNet;
 
-typedef struct{
-	int image_dim;
-	int image_size;
-	int n_images;
-	uint8_t * images_cpu;
-	float * images_float_cpu;
-	float * images;
-	int * correct_classes_cpu;
-	int * correct_classes;
-} Batch;
+
 
