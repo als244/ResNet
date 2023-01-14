@@ -1327,10 +1327,11 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	// randomly select class, then randomly select image within class
 	int class_id, image_id;
 	FILE * f;
-	char file_path[100];
+	char file_path[66];
 	for (int i = 0; i < batch_size; i++){
 		class_id = rand() % n_classes;
-		sprintf(file_path, "/mnt/storage/data/vision/imagenet/2012/%08d.buffer", class_id);
+		sprintf(file_path, "/mnt/storage/data/vision/imagenet/2012/train_data/%08d.buffer", class_id);
+		file_path[65] = '\0';
 		image_id = rand() % counts_per_class[class_id];
 		f = fopen(file_path, "rb");
 		fseek(f, image_id * image_size, SEEK_SET);
