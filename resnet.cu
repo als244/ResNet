@@ -1037,7 +1037,7 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 		else{
 			stride = 1;
 		}
-		conv_blocks[i] = init_conv_block(incoming_filters, incoming_spatial_dim, reduced_depth, expanded_depth, stride, gen, false);
+		conv_blocks[i] = init_conv_block(incoming_filters, incoming_spatial_dim, reduced_depth, expanded_depth, stride, gen, is_zero);
 		locations[loc_ind] = conv_blocks[i] -> depth_reduction;
 		sizes[loc_ind] = incoming_filters * reduced_depth;
 		loc_ind++;
