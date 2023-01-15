@@ -1896,7 +1896,8 @@ void backwards_pass(Train_ResNet * trainer){
 	crossEntropyDeriv <<< (batch_size), (1) >>> (output_layer_deriv, correct_classes, output_dim, batch_size);
 
 	// divide by the batch size because loss is sum across all batches...
-	averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
+	// NOT SURE IF WE WANT TO DO AVERAGE HERE OR NOT...?
+	//averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
 
 	printDeviceData("CROSS ENTROPY DERIV", output_layer_deriv, print_size);
 
