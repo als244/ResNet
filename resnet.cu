@@ -111,7 +111,7 @@ __global__ void matMul(const float *M, const float *N, int m, int k, int n, floa
 }
 
 // grid has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
-// each BLOCK has dim (TILE_WIDTH x BLOCK_ROWS) = # of threads
+// each BLOCK has dim (TILE_WIDTH , BLOCK_ROWS) = # of threads
 __global__ void transpose(const float *in, int rows, int cols, float * out) {
   __shared__ float tile[TILE_WIDTH][TILE_WIDTH + 1];
 
@@ -1565,7 +1565,8 @@ void prepareAndDoMatMulLeftTranspose(const float * left_orig, const float * righ
 	cudaMalloc(&temp_left, left_orig_rows * left_orig_cols * sizeof(float));
 
 	dim3 gridDimTranspose(ceil((float) left_orig_rows / TILE_WIDTH), ceil((float)left_orig_cols / TILE_WIDTH));
-	transpose <<< gridDimTranspose, TILE_WIDTH * BLOCK_ROWS >>> (left_orig, left_orig_rows, left_orig_cols, temp_left);
+	dim3 blockDimTranspose(TILE_WIDTH, BLOCK_ROWS);
+	transpose <<< gridDimTranspose, blockDimTranspose >>> (left_orig, left_orig_rows, left_orig_cols, temp_left);
 
 	dim3 gridDimMatMul(ceil((float) left_orig_cols / TILE_WIDTH), ceil((float) right_cols / TILE_WIDTH));
 	dim3 blockDimMatMul(TILE_WIDTH, TILE_WIDTH);
@@ -1578,7 +1579,9 @@ void prepareAndDoMatMulRightTranspose(const float * left, const float * right_or
 	cudaMalloc(&temp_right, right_orig_rows * right_orig_cols * sizeof(float));
 	
 	dim3 gridDimTranspose(ceil((float) right_orig_rows / TILE_WIDTH), ceil((float)right_orig_cols / TILE_WIDTH));
-	transpose <<< gridDimTranspose, TILE_WIDTH * BLOCK_ROWS >>> (right_orig, right_orig_rows, right_orig_cols, temp_right);
+	dim3 blockDimTranspose(TILE_WIDTH, BLOCK_ROWS);
+
+	transpose <<< gridDimTranspose, blockDimTranspose >>> (right_orig, right_orig_rows, right_orig_cols, temp_right);
 	
 	dim3 gridDimMatMul(ceil((float) left_rows / TILE_WIDTH), ceil((float) right_orig_rows / TILE_WIDTH));
 	dim3 blockDimMatMul(TILE_WIDTH, TILE_WIDTH);
@@ -2346,7 +2349,7 @@ int main(int argc, char *argv[]) {
 			for (int s = 0; s < BATCH_SIZE; s++){
 				val_pred_correct = pred[correct[s] * BATCH_SIZE + s];
 				for (int c = 0; c < N_CLASSES; c++){
-					if (pred[c * BATCH_SIZE + s] > val_pred_correct){
+					if (pred[c * BATCH_SIZE + s] >= val_pred_correct){
 						batch_n_wrong++;
 						break;
 					}
@@ -2359,12 +2362,8 @@ int main(int argc, char *argv[]) {
 				printf("Epoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.4f\n", epoch, iter, avg_batch_loss, batch_accuracy);
 			}
 
-
-
 			/* DO BACKPROP */
 			backwards_pass(trainer);
-
-			
 
 			/* OPTIMIZE WEIGHTS */
 			update_parameters(trainer);
