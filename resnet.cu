@@ -22,12 +22,21 @@
 #define CUDA_CALL(x) do { if((x)!=cudaSuccess) { \
     printf("Error at %s:%d\n",__FILE__,__LINE__);\
     return EXIT_FAILURE;}} while(0)
+#define CURAND_CALL(x) do { if((x) != CURAND_STATUS_SUCCESS) { \
+	printf("Error at %s:%d\n",__FILE__,__LINE__);\
+	return EXIT_FAILURE;}} while(0)
 
-// GLOBAL VARIABLE USED TO GENERATE RANDOM NUMBERS from cuRAND library
- curandGenerator_t gen;
+__global__ void setVal(int size, float val, float *out){
+ 	int ind = blockDim.x * blockIdx.x + threadIdx.x;
+ 	if (ind >= size){
+ 		return;
+ 	}
+ 	out[ind] = val;
+}
 
- void init_weights_gaussian_device(int size, float *X, float mean, float var){
- 	curandGenerateNormal(gen, X, size, mean, sqrt(var));
+void init_weights_gaussian_device(curandGenerator_t * gen, int size, float *X, float mean, float var){
+ 	float stddev = sqrtf(var);
+ 	curandStatus_t status = curandGenerateNormal(*gen, X, (size_t) size, mean, stddev);
  }
 
 // RANDOM NUMBER GENERATOR ON DEVICE CAN'T USE C LIBRARY RAND(), so use cuRAND() library instead...
@@ -841,7 +850,7 @@ BatchNorm * init_batch_norm(int spatial_dim, int depth, bool is_zero){
 
 }
 
-ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int reduced_depth, int expanded_depth, int stride, bool is_zero){
+ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int reduced_depth, int expanded_depth, int stride, curandGenerator_t * gen, bool is_zero){
 	
 	ConvBlock * conv_block = (ConvBlock *) malloc(sizeof(ConvBlock));
 	conv_block -> incoming_filters = incoming_filters;
@@ -863,7 +872,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	cudaMalloc(&depth_reduction, depth_reduction_size * sizeof(float));
 	cudaMemset(depth_reduction, 0, depth_reduction_size * sizeof(float));
 	if (!is_zero){
-		init_weights_gaussian_device(depth_reduction_size, depth_reduction, 0, 2.0 / depth_reduction_fan_in);
+		init_weights_gaussian_device(gen, depth_reduction_size, depth_reduction, 0, 2.0 / depth_reduction_fan_in);
 	}
 
 	bias_depth_reduction_size = reduced_depth;
@@ -878,7 +887,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	cudaMalloc(&spatial, spatial_size * sizeof(float));
 	cudaMemset(spatial, 0, spatial_size * sizeof(float));
 	if (!is_zero){
-		init_weights_gaussian_device(spatial_size, spatial, 0, 2.0 / spatial_fan_in);
+		init_weights_gaussian_device(gen, spatial_size, spatial, 0, 2.0 / spatial_fan_in);
 	}
 
 	bias_spatial_size = reduced_depth;
@@ -896,7 +905,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	cudaMalloc(&depth_expansion, depth_expansion_size * sizeof(float));
 	cudaMemset(depth_expansion, 0, depth_expansion_size * sizeof(float));
 	if (!is_zero){
-		init_weights_gaussian_device(depth_expansion_size, depth_expansion, 0, 2.0 / depth_expansion_fan_in);
+		init_weights_gaussian_device(gen, depth_expansion_size, depth_expansion, 0, 2.0 / depth_expansion_fan_in);
 	}
 
 	bias_depth_expansion_size = expanded_depth;
@@ -930,7 +939,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 		cudaMalloc(&projection, projection_size * sizeof(float));
 		cudaMemset(projection, 0, projection_size * sizeof(float));
 		if (!is_zero){
-			init_weights_gaussian_device(projection_size, projection, 0, 2.0 / incoming_filters);
+			init_weights_gaussian_device(gen, projection_size, projection, 0, 2.0 / incoming_filters);
 		}
 		cudaMalloc(&bias_projection, expanded_depth * sizeof(float));
 		cudaMemset(bias_projection, 0, expanded_depth * sizeof(float));
@@ -950,7 +959,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	return conv_block;
 }
 
-Params * init_model_parameters(Dims * model_dims, bool is_zero){
+Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool is_zero){
 
 	Params * params = (Params *) malloc(sizeof(Params));
 
@@ -976,15 +985,14 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 
 	// init first 7 * 7 conv_layer
 	float * init_conv_layer;
-	int init_conv_size = init_kernel_dim * init_kernel_dim * init_conv_filters;
+	int init_conv_size = init_kernel_dim * init_kernel_dim * init_conv_filters * 3;
 	float init_conv_fan_in = 3 * input_dim * input_dim;
-	cudaMalloc(&init_conv_layer,  init_conv_size * sizeof(float));
-	cudaMemset(init_conv_layer, 0, init_conv_size * sizeof(float));
+	cudaError_t malloc_err = cudaMalloc(&init_conv_layer,  init_conv_size * sizeof(float));
+	cudaError_t memset_err = cudaMemset(init_conv_layer, 0, init_conv_size * sizeof(float));
 	if (!is_zero){
-		init_weights_gaussian_device(init_conv_size, init_conv_layer, 0, 2.0 / init_conv_fan_in);
+		init_weights_gaussian_device(gen, init_conv_size, init_conv_layer, 0, 2.0 / init_conv_fan_in);
 	}
 	params -> init_conv_layer = init_conv_layer;
-
 	int loc_ind = 0;
 	locations[loc_ind] = init_conv_layer;
 	sizes[loc_ind] = init_kernel_dim * init_kernel_dim * init_conv_filters;
@@ -1029,7 +1037,7 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 		else{
 			stride = 1;
 		}
-		conv_blocks[i] = init_conv_block(incoming_filters, incoming_spatial_dim, reduced_depth, expanded_depth, stride, false);
+		conv_blocks[i] = init_conv_block(incoming_filters, incoming_spatial_dim, reduced_depth, expanded_depth, stride, gen, false);
 		locations[loc_ind] = conv_blocks[i] -> depth_reduction;
 		sizes[loc_ind] = incoming_filters * reduced_depth;
 		loc_ind++;
@@ -1102,7 +1110,7 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 	cudaMalloc(&fully_connected, fully_connected_size * sizeof(float));
 	cudaMemset(fully_connected, 0, fully_connected_size * sizeof(float));
 	if (!is_zero){
-		init_weights_gaussian_device(fully_connected_size, fully_connected, 0, 2.0 / fully_connected_fan_in);
+		init_weights_gaussian_device(gen, fully_connected_size, fully_connected, 0, 2.0 / fully_connected_fan_in);
 	}
 
 	params -> fully_connected = fully_connected;
@@ -1115,10 +1123,10 @@ Params * init_model_parameters(Dims * model_dims, bool is_zero){
 	return params;
 }
 
-ResNet * init_resnet(Dims * dims){
+ResNet * init_resnet(Dims * dims, curandGenerator_t * gen){
 	ResNet * model = (ResNet *) malloc(sizeof(ResNet));
 	model -> dims = dims;
-	Params * params = init_model_parameters(dims, false);
+	Params * params = init_model_parameters(dims, gen, false);
 	model -> params = params;
 	return model;
 }
@@ -1303,9 +1311,9 @@ Backprop_Buffer * init_backprop_buffer(Dims * dims, ConvBlock ** conv_blocks, in
 	cudaMalloc(&output_layer_deriv, output_size * sizeof(float));
 	backprop_buffer -> output_layer_deriv = output_layer_deriv;
 
-	backprop_buffer -> param_derivs = init_model_parameters(dims, true);
-	backprop_buffer -> prev_means = init_model_parameters(dims, true);
-	backprop_buffer -> prev_vars = init_model_parameters(dims, true);
+	backprop_buffer -> param_derivs = init_model_parameters(dims, NULL, true);
+	backprop_buffer -> prev_means = init_model_parameters(dims, NULL, true);
+	backprop_buffer -> prev_vars = init_model_parameters(dims, NULL, true);
 	backprop_buffer -> activation_derivs = init_activations(dims, conv_blocks, batch_size);
 
 	return backprop_buffer;
@@ -2259,12 +2267,15 @@ int main(int argc, char *argv[]) {
 	Dims * dims = init_dimensions(INPUT_DIM, INIT_KERNEL_DIM, INIT_CONV_FILTERS, INIT_CONV_STRIDE, INIT_MAXPOOL_DIM, INIT_MAXPOOL_STRIDE,
 									N_CONV_BLOCKS, IS_BLOCK_SPATIAL_REDUCTION, FINAL_DEPTH, N_CLASSES);
 
+
+	// declaring curandGenerator
+	curandGenerator_t gen;
 	// INITIALIZING RANDOM NUMBER GENERATOR USED TO INIT WEIGHTS
-	curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
-	curandSetPseudoRandomGeneratorSeed(gen, 124ULL);
+	curandStatus_t status_create = curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+	curandStatus_t status_set_seed = curandSetPseudoRandomGeneratorSeed(gen, 1234ULL);
 
 	// INITIALIZING MODEL
-	ResNet * model = init_resnet(dims);
+	ResNet * model = init_resnet(dims, &gen);
 
 
 	// INITIALIZING TRAINING
