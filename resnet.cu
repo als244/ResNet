@@ -19,6 +19,9 @@
 #define MAX_SHARED_MEMORY 48000
 #define MAX_SHARED_MEM_FLOATS 12000
 
+// used to hide all print statements for device data
+#define TO_PRINT false
+
 #define CUDA_CALL(x) do { if((x)!=cudaSuccess) { \
     printf("Error at %s:%d\n",__FILE__,__LINE__);\
     return EXIT_FAILURE;}} while(0)
@@ -513,9 +516,12 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	beta_deriv[filter_id] = dBeta;
 
 	// compute dL/dVar and most of dL/dMean
-	float dVar, dMean, partial_var_deriv, norm_temp_deriv_val;
-	float filt_var_three_halfs_power = -.5 * powf(var_val + eps, -1.5);
-	float filt_var_recip_sqrt = -1 / sqrtf(var_val + eps);
+	float dVar = 0;
+	float dMean = 0;
+	float partial_var_deriv = 0; 
+	float norm_temp_deriv_val;
+	float filt_var_three_halfs_power = -0.5 * powf(var_val + eps, -1.5);
+	float filt_var_recip_sqrt = -1.0 / sqrtf(var_val + eps);
 	for (int s = 0; s < batch_size; s++){
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
@@ -768,6 +774,20 @@ __global__ void softMax(const float * X, int batch_size, int output_len, float *
     }
   }
 }
+
+// launch with gridDim (output_dim) and threadDim (batch_size)
+__global__ void averageDerivOverBatchSize(float * output_deriv, int output_dim, int batch_size){
+
+	int output_class = blockIdx.x;
+	int sample_ind = threadIdx.x;
+
+	// shouldn't happen because of launch spec but check anyways...
+	if ((output_class >= output_dim) || (sample_ind >= batch_size)){
+		return;
+	}
+	output_deriv[sample_ind * output_dim + output_class] /= batch_size;
+}
+
 
 // launch with gridDim = (batch_size), blockDim = (1)
 __global__ void crossEntropyDeriv(float * output_deriv, const int * correct_classes, int output_dim, int batch_size){
@@ -1593,15 +1613,21 @@ void prepareAndDoMatMulRightTranspose(const float * left, const float * right_or
 }
 
 void printDeviceData(const char * name_of_variable, float * device_variable, int size){
-	float * cpu_data = (float *) malloc(size * sizeof(float));
-	cudaMemcpy(cpu_data, device_variable, size * sizeof(float), cudaMemcpyDeviceToHost);
-	printf("VARIABLE NAME: %s\n\n", name_of_variable);
-	printf("DATA:\n");
-	for (int i = 0; i < size; i++){
-		printf("%d: %f\n", i, cpu_data[i]);
+	bool print = TO_PRINT;
+	if (print){
+		float * cpu_data = (float *) malloc(size * sizeof(float));
+		cudaMemcpy(cpu_data, device_variable, size * sizeof(float), cudaMemcpyDeviceToHost);
+		printf("VARIABLE NAME: %s\n\n", name_of_variable);
+		printf("DATA:\n");
+		for (int i = 0; i < size; i++){
+			if ((cpu_data[i] > 10) || (cpu_data[i] < -10)) {
+				printf("%d: %f\n", i, cpu_data[i]);
+				exit(1);
+			}
+		}
+		printf("\n\n\n");
+		free(cpu_data);
 	}
-	printf("\n\n\n");
-	free(cpu_data);
 }
 
 void forward_pass(Train_ResNet * trainer){
@@ -1628,8 +1654,8 @@ void forward_pass(Train_ResNet * trainer){
 
 	prepareAndDoConvolution(init_spatial_dim, init_kernel_dim, init_in_filters, init_out_filters, init_stride, batch_size, input, first_conv, first_conv_bias, first_conv_output);
 
-	//int print_size = init_out_spatial_dim * init_out_spatial_dim * init_out_filters * batch_size;
-	//printDeviceData("INIT CONV APPLIED", first_conv_output, print_size);
+	int print_size = 10;
+	printDeviceData("INIT CONV APPLIED", first_conv_output, print_size);
 
 
 	BatchNorm * norm_init_conv_params = trainer -> model -> params -> norm_init_conv;
@@ -1637,6 +1663,8 @@ void forward_pass(Train_ResNet * trainer){
 	float * init_activated = trainer -> forward_buffer -> activations -> init_conv_activated;
 
 	prepareAndDoBatchNormAndActivate(norm_init_conv_params, norm_init_conv_cache, batch_size, eps, first_conv_output, init_activated);
+
+	printDeviceData("INIT CONV ACTIVATED", init_activated, print_size);
 
 	int init_maxpool_dim = dims -> init_maxpool_dim;
 	int init_maxpool_stride = dims -> init_maxpool_stride;
@@ -1647,6 +1675,7 @@ void forward_pass(Train_ResNet * trainer){
 	dim3 gridDimMaxPool(init_maxpool_out_dim, init_maxpool_out_dim);
 	doMaxPool <<< gridDimMaxPool , init_out_filters >>> (init_activated, init_maxpool_dim, init_maxpool_stride, batch_size, max_ind_buff, init_convblock_input);
 
+	printDeviceData("MAX POOL OUTPUT", init_convblock_input, print_size);
 
 	/* NOW CAN MOVE ONTO TO CONV_BLOCK LAYERS! */
 
@@ -1683,12 +1712,16 @@ void forward_pass(Train_ResNet * trainer){
 
 		prepareAndDoConvolution(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_biases, conv_output);
 
+		printDeviceData("REDUCED CONV APPLIED", conv_output, print_size);
+
 		norm_input = conv_output;
 		cur_batch_norm_params = cur_conv_block_params -> norm_depth_reduction;
 		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_reduced;
 		norm_output = cur_conv_block_activation -> post_reduced_activated;
 
 		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output);
+
+		printDeviceData("REDUCED CONV NORM & ACTIVATED", norm_output, print_size);
 
 		// do 3x3 spatial convolution
 
@@ -1708,12 +1741,16 @@ void forward_pass(Train_ResNet * trainer){
 
 		prepareAndDoConvolution(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_biases, conv_output);
 
+		printDeviceData("SPATIAL CONV APPLIED", conv_output, print_size);
+
 		norm_input = conv_output;
 		cur_batch_norm_params = cur_conv_block_params -> norm_spatial;
 		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_spatial;
 		norm_output = cur_conv_block_activation -> post_spatial_activated;
 
 		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output);
+
+		printDeviceData("SPATIAL CONV NORM & ACTIVATED", norm_output, print_size);
 
 		// do 1x1 depth expansion convolution
 
@@ -1731,6 +1768,8 @@ void forward_pass(Train_ResNet * trainer){
 		conv_output = cur_conv_block_activation -> post_expanded;
 
 		prepareAndDoConvolution(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_biases, conv_output);
+
+		printDeviceData("EXPANDED CONV APPLIED", conv_output, print_size);
 
 		// now need to add identity of conv_block_input (if same dimensions), or project=convolve (different dimensions) and add to conv_output
 		// projection is a incoming block filters X expanded depth matrix
@@ -1768,8 +1807,12 @@ void forward_pass(Train_ResNet * trainer){
 			transformed_residual = conv_block_input;
 		}
 
+		printDeviceData("(TRANSFORMED) RESIDUAL", transformed_residual, print_size);
+
 		// add identity residual connection (or projected residual connection) to the prior convolutional output
 		addVec <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size_conv_block_output, conv_output, transformed_residual, conv_block_output);
+
+		printDeviceData("CONV OUTPUT + (TRANSFORMED) RESIDUAL", conv_block_output, print_size);
 
 		norm_input = conv_block_output;
 		cur_batch_norm_params = cur_conv_block_params -> norm_residual_added;
@@ -1777,6 +1820,8 @@ void forward_pass(Train_ResNet * trainer){
 		norm_output = cur_conv_block_activation -> output_activated;
 
 		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output);
+
+		printDeviceData("CONV BLOCK OUTPUT NORM & ACTIVATED", norm_output, print_size);
 
 		// prepare for next block...
 		conv_block_input = norm_output;
@@ -1791,6 +1836,8 @@ void forward_pass(Train_ResNet * trainer){
 
 	// format of output is each row is a sample and has a row size of 2048
 	doFilterAvgPool <<< (final_filters), (batch_size) >>> (final_conv_block_output, final_spatial_dim, final_avg_pool_values);
+
+	printDeviceData("FINAL AVG POOL VALUES", final_avg_pool_values, print_size);
 
 
 	// APPLY FULLY CONNECTED LAYER BETWEEN (2048, 1000)
@@ -1808,9 +1855,13 @@ void forward_pass(Train_ResNet * trainer){
 
 	matMul <<< (gridDimFCOutput), (blockDimFCOutput) >>> (final_avg_pool_values, fc_weights, batch_size, final_filters, output_dim, fc_output);
 
+	printDeviceData("FULLY CONNECTED OUTPUT", fc_output, print_size);
+
 	// DO SOFTMAX
 	float * pred = trainer -> forward_buffer -> pred;
 	softMax <<< (batch_size), (1) >>> (fc_output, batch_size, output_dim, pred);
+
+	printDeviceData("SOFTMAX PREDICTIONS", pred, print_size);
 
 	// FINISH UP BY POPULATING PREDICTIONS ONTO CPU
 	float * pred_cpu = trainer -> forward_buffer -> pred_cpu;
@@ -1829,6 +1880,8 @@ void backwards_pass(Train_ResNet * trainer){
 	Params * param_derivs = backprop_buffer -> param_derivs;
 	Activations * activation_derivs = backprop_buffer -> activation_derivs;
 
+	int print_size = 10;
+
 	/* STEP 1: LAST LAYER DERIVATIVE */
 
 	// layer has output_dim * batch_size values
@@ -1839,7 +1892,13 @@ void backwards_pass(Train_ResNet * trainer){
 	float * pred = trainer -> forward_buffer -> pred;
 	float * output_layer_deriv = backprop_buffer -> output_layer_deriv;
 	cudaMemcpy(output_layer_deriv, pred, batch_size * output_dim * sizeof(float), cudaMemcpyDeviceToDevice);
+
 	crossEntropyDeriv <<< (batch_size), (1) >>> (output_layer_deriv, correct_classes, output_dim, batch_size);
+
+	// divide by the batch size because loss is sum across all batches...
+	averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
+
+	printDeviceData("CROSS ENTROPY DERIV", output_layer_deriv, print_size);
 
 	/* STEP 2: FC WEIGHT DERIV AND FINAL AVG POOL (SECOND LAST ACTIVTION LAYER) DERIVATIVE */
 
@@ -1851,10 +1910,14 @@ void backwards_pass(Train_ResNet * trainer){
 	float * final_conv_output_pooled = activations -> final_conv_output_pooled;
 	prepareAndDoMatMulLeftTranspose(final_conv_output_pooled, output_layer_deriv, batch_size, final_depth, batch_size, output_dim, fc_deriv);
 
+	printDeviceData("FC WEIGHT DERIV", fc_deriv, print_size);
+
 	// FINAL AVG POOL (N, 2048) DERIV = matMul(output_layer_deriv, transpose(FC Weight))
 	float * fc_weights = model_params -> fully_connected;
 	float * final_avg_pool_deriv = activation_derivs -> final_conv_output_pooled;
 	prepareAndDoMatMulRightTranspose(output_layer_deriv, fc_weights, batch_size, output_dim, final_depth, output_dim, final_avg_pool_deriv);
+
+	printDeviceData("FINAL AVG POOL ACTIVATION DERIV", final_avg_pool_deriv, print_size);
 
 
 	/* CONV BLOCK DATA FROM FORWARD PASS */
@@ -1876,6 +1939,8 @@ void backwards_pass(Train_ResNet * trainer){
 	// using final_avg_pool_deriv (batch_size, 2048) to populate final_conv_block_output_deriv (batch_size, 7, 7, 2048)
 	// each expanded (prior to pooling) spatial index takes on value of given filter's avg_pool_deriv / (spatial_dim^2)
 	filterAvgPoolDeriv <<< (final_depth), (batch_size) >>> (final_avg_pool_deriv, final_depth, batch_size, final_spatial_dim, final_conv_block_output_deriv);
+
+	printDeviceData("FINAL CONV BLOCK OUTPUT ACTIVATION DERIV", final_conv_block_output_deriv, print_size);
 
 	
 	/* STEP 4: CONV BLOCK & BATCH NORM DERIVS  */
@@ -1960,6 +2025,8 @@ void backwards_pass(Train_ResNet * trainer){
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
+		printDeviceData("CONV BLOCK OUTPUT ACTIVATION & NORM DERIV", bn_input_deriv, cur_batch_norm_params->spatial_dim * cur_batch_norm_params -> spatial_dim * cur_batch_norm_params -> depth);
+
 		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv) */
 
 		// check if there is a projection (aka convolution over depth/kern_dim=1 or possibly stride=2/kern_dim=3), otherwise the projection deriv is 1
@@ -1996,6 +2063,10 @@ void backwards_pass(Train_ResNet * trainer){
 			prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
 													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, true);
+
+			printDeviceData("PROJECTED CONV INPUT DERIV", conv_input_deriv, print_size);
+			printDeviceData("PROJECTED CONV WEIGHT DERIV", conv_weight_deriv, print_size);
+			printDeviceData("PROJECTED CONV BIAS DERIV", conv_bias_deriv, print_size);
 		}
 		else{
 			total_size = batch_size * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_filters);
@@ -2027,6 +2098,10 @@ void backwards_pass(Train_ResNet * trainer){
 		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
 													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, true);
+		
+		printDeviceData("EXPANDED CONV INPUT DERIV", conv_input_deriv, print_size);
+		printDeviceData("EXPANDED CONV WEIGHT DERIV", conv_weight_deriv, print_size);
+		printDeviceData("EXPANDED CONV BIAS DERIV", conv_bias_deriv, print_size);
 
 
 		/* 4: Spatial Convolution Activation and Batch Norm Derivs */
@@ -2050,6 +2125,8 @@ void backwards_pass(Train_ResNet * trainer){
 		
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+
+		printDeviceData("SPATIAL ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
 		/* 5: Spatial Convolution Derivs */
 
@@ -2076,6 +2153,10 @@ void backwards_pass(Train_ResNet * trainer){
 													conv_input, conv_weight, conv_out_deriv,
 													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, true);
 
+		printDeviceData("SPATIAL CONV INPUT DERIV", conv_input_deriv, print_size);
+		printDeviceData("SPATIAL CONV WEIGHT DERIV", conv_weight_deriv, print_size);
+		printDeviceData("SPATIAL CONV BIAS DERIV", conv_bias_deriv, print_size);
+
 
 		/* 6: Reduced Convolution Activation and Batch Norm Derivs */
 
@@ -2098,6 +2179,8 @@ void backwards_pass(Train_ResNet * trainer){
 		
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+
+		printDeviceData("REDUCED ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
 		/* 7: Reduced Convolution Derivs */
 
@@ -2124,6 +2207,10 @@ void backwards_pass(Train_ResNet * trainer){
 		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, true,
 													conv_input, conv_weight, conv_out_deriv,
 													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, true);
+
+		printDeviceData("REDUCED CONV INPUT DERIV", conv_input_deriv, print_size);
+		printDeviceData("REDUCED CONV WEIGHT DERIV", conv_weight_deriv, print_size);
+		printDeviceData("REDUCED CONV BIAS DERIV", conv_bias_deriv, print_size);
 
 	}
 
@@ -2155,6 +2242,7 @@ void backwards_pass(Train_ResNet * trainer){
 	// compute max pool deriv (i.e. populate maxpool_inp_deriv)
 	maxPoolDeriv <<< gridDimMaxPoolDeriv, blockDimMaxPoolDeriv >>> (max_inds, maxpool_out_deriv, maxpool_kern_dim, maxpool_in_spatial_dim, maxpool_stride, maxpool_filters, batch_size, maxpool_inp_deriv);
 
+	printDeviceData("MAX POOL INPUT ACTIVATION DERIV", maxpool_inp_deriv, print_size);
 
 	/* STEP 6: INIT BATCH NORM & CONV DERIV */
 
@@ -2179,6 +2267,8 @@ void backwards_pass(Train_ResNet * trainer){
 		
 	prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+
+	printDeviceData("INIT CONV ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
 	// BACKPROP OVER FIRST CONV LAYER
 
@@ -2205,6 +2295,9 @@ void backwards_pass(Train_ResNet * trainer){
 	prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
 													conv_input_deriv, conv_weight_deriv, conv_bias_deriv, false);
+
+	printDeviceData("INIT CONV WEIGHT DERIV", conv_weight_deriv, print_size);
+	printDeviceData("INIT CONV BIAS DERIV", conv_bias_deriv, print_size);
 }	
 
 
@@ -2348,7 +2441,6 @@ int main(int argc, char *argv[]) {
 			forward_pass(trainer);
 
 			
-
 			/* RECORD LOSS AND ACCURACY */
 
 			// dimensions of pred: (N_CLASSES, BATCH_SIZE)
