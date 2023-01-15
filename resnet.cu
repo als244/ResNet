@@ -803,6 +803,9 @@ __global__ void updateParams(int size, float * model_params, const float * means
 		return;
 	}
 	model_params[i] = model_params[i] - alpha_t * means[i] / (sqrtf(vars[i]) + eps);
+	if (isnan(model_params[i])){
+		printf("Set Param to nan at index: %d\n", i);
+	}
 }
 
 /* INITIALIZE CORE MODEL STRUCTURES */
@@ -837,7 +840,7 @@ BatchNorm * init_batch_norm(int spatial_dim, int depth, bool is_zero){
 	cudaMalloc(&gamma, depth * sizeof(float));
 	cudaMemset(gamma, 0, depth * sizeof(float));
 	if (!is_zero){
-		cudaMemset(gamma, 1, depth * sizeof(float));
+		setVal <<< ceil((float) depth / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (depth, 1.0, gamma);
 	}
 
 	cudaMalloc(&beta, depth * sizeof(float));
@@ -1008,7 +1011,7 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 	sizes[loc_ind] = init_conv_filters;
 	loc_ind++;
 
-	BatchNorm * norm_init_conv = init_batch_norm(input_dim, init_conv_filters, is_zero);
+	BatchNorm * norm_init_conv = init_batch_norm(input_dim / model_dims -> init_conv_stride, init_conv_filters, is_zero);
 	params -> norm_init_conv = norm_init_conv;
 
 	locations[loc_ind] = norm_init_conv -> gamma;
@@ -1589,6 +1592,18 @@ void prepareAndDoMatMulRightTranspose(const float * left, const float * right_or
 	cudaFree(temp_right);
 }
 
+void printDeviceData(const char * name_of_variable, float * device_variable, int size){
+	float * cpu_data = (float *) malloc(size * sizeof(float));
+	cudaMemcpy(cpu_data, device_variable, size * sizeof(float), cudaMemcpyDeviceToHost);
+	printf("VARIABLE NAME: %s\n\n", name_of_variable);
+	printf("DATA:\n");
+	for (int i = 0; i < size; i++){
+		printf("%d: %f\n", i, cpu_data[i]);
+	}
+	printf("\n\n\n");
+	free(cpu_data);
+}
+
 void forward_pass(Train_ResNet * trainer){
 
 	Dims * dims = trainer -> model -> dims;
@@ -1612,6 +1627,10 @@ void forward_pass(Train_ResNet * trainer){
 	int init_out_spatial_dim = init_spatial_dim / init_stride;
 
 	prepareAndDoConvolution(init_spatial_dim, init_kernel_dim, init_in_filters, init_out_filters, init_stride, batch_size, input, first_conv, first_conv_bias, first_conv_output);
+
+	//int print_size = init_out_spatial_dim * init_out_spatial_dim * init_out_filters * batch_size;
+	//printDeviceData("INIT CONV APPLIED", first_conv_output, print_size);
+
 
 	BatchNorm * norm_init_conv_params = trainer -> model -> params -> norm_init_conv;
 	Cache_BatchNorm * norm_init_conv_cache = trainer -> forward_buffer -> activations -> norm_init_conv;
@@ -2284,7 +2303,7 @@ int main(int argc, char *argv[]) {
 	// INITIALIZING TRAINING
 
 	// Batch Structure (will be modified every iteration of every epoch)
-	int BATCH_SIZE = 1;
+	int BATCH_SIZE = 32;
 	// dimensions of INPUT_DIM X INPUT_DIM x 3 color channels
 	int IMAGE_SIZE = INPUT_DIM * INPUT_DIM * 3;
 	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE, INPUT_DIM);
@@ -2311,7 +2330,7 @@ int main(int argc, char *argv[]) {
 	float epoch_loss, batch_loss, avg_batch_loss, epoch_accuracy, batch_accuracy, val_pred_correct;
 	float total_images_per_epoch = BATCH_SIZE * iterations_per_epoch;
 
-	int PRINT_FREQ = 100;
+	int PRINT_FREQ = 1;
 
 	for (int epoch = 0; epoch < N_EPOCHS; epoch++){
 		epoch_loss = 0;
