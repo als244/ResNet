@@ -2405,7 +2405,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.1;
+	float LEARNING_RATE = 0.0001;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
 	float EPS = 0.0000001;
@@ -2432,7 +2432,10 @@ int main(int argc, char *argv[]) {
 		epoch_n_wrong = 0;
 		for (int iter = 0; iter < iterations_per_epoch; iter++){
 
+			printf("************\n");
+
 			/* LOAD NEW BATCH */
+			printf("Loading Batch...\n");
 			// values go into trainer -> cur_batch -> [images_cpu|images_float_cpu|images|correct_classes_cpu|correct_classes]
 			load_new_batch(class_metadata, trainer -> cur_batch);
 
@@ -2440,6 +2443,7 @@ int main(int argc, char *argv[]) {
 
 			/* DO FORWARD PROP */
 			// final predictions go into trainer -> forward_buffer -> [pred|pred_cpu|prediction_label]
+			printf("Making Predictions...\n");
 			forward_pass(trainer);
 
 			
@@ -2472,13 +2476,15 @@ int main(int argc, char *argv[]) {
 			batch_accuracy = ((float) BATCH_SIZE - batch_n_wrong) / ((float) BATCH_SIZE);
 
 			if (iter % PRINT_FREQ == 0){
-				printf("Epoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.4f\n", epoch, iter, avg_batch_loss, batch_accuracy);
+				printf("\nEpoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.4f\n\n", epoch, iter, avg_batch_loss, batch_accuracy);
 			}
 
 			/* DO BACKPROP */
+			printf("Backprop to Compute Derivs...\n");
 			backwards_pass(trainer);
 
 			/* OPTIMIZE WEIGHTS */
+			printf("Applying Optimizer to Update Params...\n\n");
 			update_parameters(trainer);
 		}
 
