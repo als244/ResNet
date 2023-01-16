@@ -81,8 +81,8 @@ __global__ void matMul(const float *M, const float *N, int m, int k, int n, floa
 	int thread_x = threadIdx.x;
 	int thread_y = threadIdx.y;
 
-	int row_ind = block_y * TILE_WIDTH + thread_y;
-	int col_ind = block_x * TILE_WIDTH + thread_x;
+	int row_ind = block_x * TILE_WIDTH + thread_x;
+	int col_ind = block_y * TILE_WIDTH + thread_y;
 
 	if (row_ind >= m || col_ind >= n){
 		return;
@@ -90,28 +90,29 @@ __global__ void matMul(const float *M, const float *N, int m, int k, int n, floa
 
 	float val = 0;
 	for (int phase = 0; phase < ceil((float) k / float(TILE_WIDTH)); phase++) {
-		if (phase * TILE_WIDTH + thread_x < k){
-			M_tile[thread_y][thread_x] = M[row_ind * k + phase * TILE_WIDTH + thread_x];
-		}
-		else{
-			M_tile[thread_y][thread_x] = 0;
-		}
 		if (phase * TILE_WIDTH + thread_y < k){
-			N_tile[thread_y][thread_x] = N[(phase * TILE_WIDTH + thread_y) * k + col_ind];
+			M_tile[thread_x][thread_y] = M[row_ind * k + phase * TILE_WIDTH + thread_y];
 		}
 		else{
-			N_tile[thread_y][thread_x] = 0;
+			M_tile[thread_x][thread_y] = 0;
+		}
+		if (phase * TILE_WIDTH + thread_x < n){
+			N_tile[thread_x][thread_y] = N[(phase * TILE_WIDTH + thread_x) * k + col_ind];
+		}
+		else{
+			N_tile[thread_x][thread_y] = 0;
 		}
 
 		__syncthreads();
 
 		for (int t = 0; t < TILE_WIDTH; t++){
-			val += M_tile[thread_y][t] * N_tile[t][thread_x];
+			val += M_tile[thread_x][t] * N_tile[t][thread_y];
 		}
 		__syncthreads();
 	}
 	out[row_ind * n + col_ind] = val;
 }
+
 
 // grid has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
 // each BLOCK has dim (TILE_WIDTH , BLOCK_ROWS) = # of threads
@@ -1620,9 +1621,8 @@ void printDeviceData(const char * name_of_variable, float * device_variable, int
 		printf("VARIABLE NAME: %s\n\n", name_of_variable);
 		printf("DATA:\n");
 		for (int i = 0; i < size; i++){
-			if ((cpu_data[i] > 10) || (cpu_data[i] < -10)) {
+			if ((cpu_data[i] > 10) || (cpu_data[i] < -10) || (isnan(cpu_data[i])) || (isinf(cpu_data[i]))) {
 				printf("%d: %f\n", i, cpu_data[i]);
-				exit(1);
 			}
 		}
 		printf("\n\n\n");
@@ -1837,7 +1837,7 @@ void forward_pass(Train_ResNet * trainer){
 	// format of output is each row is a sample and has a row size of 2048
 	doFilterAvgPool <<< (final_filters), (batch_size) >>> (final_conv_block_output, final_spatial_dim, final_avg_pool_values);
 
-	printDeviceData("FINAL AVG POOL VALUES", final_avg_pool_values, print_size);
+	printDeviceData("FINAL AVG POOL VALUES", final_avg_pool_values, batch_size * 2048);
 
 
 	// APPLY FULLY CONNECTED LAYER BETWEEN (2048, 1000)
@@ -1855,7 +1855,8 @@ void forward_pass(Train_ResNet * trainer){
 
 	matMul <<< (gridDimFCOutput), (blockDimFCOutput) >>> (final_avg_pool_values, fc_weights, batch_size, final_filters, output_dim, fc_output);
 
-	printDeviceData("FULLY CONNECTED OUTPUT", fc_output, print_size);
+	printDeviceData("FULLY CONNECTED WEIGHTS", fc_weights, 2048 * 1000);
+	printDeviceData("FULLY CONNECTED OUTPUT", fc_output, batch_size * 1000);
 
 	// DO SOFTMAX
 	float * pred = trainer -> forward_buffer -> pred;
@@ -2026,7 +2027,7 @@ void backwards_pass(Train_ResNet * trainer){
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
 
-		printDeviceData("CONV BLOCK OUTPUT ACTIVATION & NORM DERIV", bn_input_deriv, cur_batch_norm_params->spatial_dim * cur_batch_norm_params -> spatial_dim * cur_batch_norm_params -> depth);
+		printDeviceData("CONV BLOCK OUTPUT ACTIVATION & NORM DERIV", bn_input_deriv, print_size);
 
 		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv) */
 
