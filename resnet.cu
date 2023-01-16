@@ -1425,6 +1425,7 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 		f = fopen(file_path, "rb");
 		fseek(f, image_id * image_size, SEEK_SET);
 		fread(images_cpu + i * image_size, sizeof(uint8_t), (size_t) image_size, f);
+		fclose(f);
 		correct_classes_cpu[i] = class_id;
 	}
 
