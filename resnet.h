@@ -177,8 +177,15 @@ typedef struct{
 	int image_dim;
 	int image_size;
 	int n_images;
-	uint8_t * images_cpu;
+	int cur_shard_id;
+	int cur_batch_in_shard;
+	int shard_n_images;
+	// will be a massive array to load all images in shard into CPU RAM
+	float * full_shard_images;
+	int * full_shard_correct_classes;
+	// will be the subset of shard that represents current batch
 	float * images_float_cpu;
+	// transfer of images_float_cpu to the GPU
 	float * images;
 	int * correct_classes_cpu;
 	int * correct_classes;

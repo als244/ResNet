@@ -71,7 +71,7 @@ __global__ void addVec(int size, float * A, float * B, float * out){
 
 // GRID has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
 // each BLOCK has dim (TILE_WIDTH, TILE_WIDTH)
-__global__ void matMul(const float *M, const float *N, int m, int k, int n, float *out){
+__global__ void matMulOptimized(const float *M, const float *N, int m, int k, int n, float *out){
 	__shared__ float M_tile[TILE_WIDTH][TILE_WIDTH + 1];
 	__shared__ float N_tile[TILE_WIDTH][TILE_WIDTH + 1];
 
@@ -96,8 +96,8 @@ __global__ void matMul(const float *M, const float *N, int m, int k, int n, floa
 		else{
 			M_tile[thread_x][thread_y] = 0;
 		}
-		if (phase * TILE_WIDTH + thread_x < n){
-			N_tile[thread_x][thread_y] = N[(phase * TILE_WIDTH + thread_x) * k + col_ind];
+		if (phase * TILE_WIDTH + thread_x < k){
+			N_tile[thread_x][thread_y] = N[(phase * TILE_WIDTH + thread_x) * n + col_ind];
 		}
 		else{
 			N_tile[thread_x][thread_y] = 0;
@@ -114,13 +114,36 @@ __global__ void matMul(const float *M, const float *N, int m, int k, int n, floa
 }
 
 
+// GRID has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
+// each BLOCK has dim (TILE_WIDTH, TILE_WIDTH)
+__global__ void matMul(const float *M, const float *N, int m, int k, int n, float *out){
+
+	
+	int row_ind = blockIdx.x * TILE_WIDTH + threadIdx.x;
+	int col_ind = blockIdx.y * TILE_WIDTH + threadIdx.y;
+
+	if (row_ind >= m || col_ind >= n){
+		return;
+	}
+
+	float val = 0;
+	for (int z = 0; z < k; z++){
+		val += M[row_ind * k + z] * N[z * n + col_ind];
+	}
+	out[row_ind * n + col_ind] = val;
+}
+
+
+// unoptimized transpose because used rarely...
+
 // grid has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
 // each BLOCK has dim (TILE_WIDTH , BLOCK_ROWS) = # of threads
-__global__ void transpose(const float *in, int rows, int cols, float * out) {
+__global__ void transposeSharedMem(const float *in, int rows, int cols, float * out) {
   __shared__ float tile[TILE_WIDTH][TILE_WIDTH + 1];
 
-  int col_ind = blockIdx.x * TILE_WIDTH + threadIdx.x;
-  int row_ind = blockIdx.y * TILE_WIDTH + threadIdx.y;
+  int row_ind = blockIdx.x * TILE_WIDTH + threadIdx.y;
+  int col_ind = blockIdx.y * TILE_WIDTH + threadIdx.x;
+  
   
   if (col_ind >= cols || row_ind >= rows){
   	return;
@@ -130,15 +153,30 @@ __global__ void transpose(const float *in, int rows, int cols, float * out) {
   // each thread needs to load TILE_WIDTH / BLOCK_ROWS values
   int row_boundary = min(TILE_WIDTH, rows - row_ind);
   for (int j = 0; j < row_boundary; j += BLOCK_ROWS){
-     tile[threadIdx.y+j][threadIdx.x] = in[(row_ind+j)*cols + col_ind];
+     tile[threadIdx.y + j][threadIdx.x] = in[(row_ind+j)*cols + col_ind];
   }
 
   __syncthreads();
 
   int col_boundary = min(TILE_WIDTH, cols - col_ind);
   for (int j = 0; j < col_boundary; j += BLOCK_ROWS){
-     out[(col_ind+j)*rows + row_ind] = tile[threadIdx.x][threadIdx.y + j];
+     out[col_ind*rows + row_ind + j] = tile[threadIdx.y + j][threadIdx.x];
   }
+}
+
+// grid has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
+// each BLOCK has dim (TILE_WIDTH , TILE_WIDTH) = # of threads
+__global__ void transpose(const float *in, int rows, int cols, float * out) {
+
+  int row_ind = blockIdx.x * TILE_WIDTH + threadIdx.x;
+  int col_ind = blockIdx.y * TILE_WIDTH + threadIdx.y;
+  
+  
+  if (col_ind >= cols || row_ind >= rows){
+  	return;
+  }
+
+  out[col_ind * rows + row_ind] = in[row_ind * cols + col_ind];
 }
 
 
@@ -1372,7 +1410,7 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 	return trainer;
 }
 
-Batch * init_general_batch(int n_images, int image_size, int image_dim){
+Batch * init_general_batch(int n_images, int image_size, int image_dim, int shard_n_images){
 	Batch * batch = (Batch *) malloc(sizeof(Batch));
 
 	batch -> n_images = n_images;
@@ -1380,8 +1418,7 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim){
 	batch -> image_size = image_size;
 	batch -> image_dim = image_dim;
 	// load batch by first brining into cpu
-	batch -> images_cpu = (uint8_t *) malloc(n_images * image_size * sizeof(uint8_t));
-	batch -> images_float_cpu = (float *) malloc(n_images * image_size * sizeof(float));
+	batch -> images_float_cpu = (float *) malloc((size_t) n_images * (size_t) image_size * sizeof(float));
 
 	// allocate memory on gpu so that after loaded on cpu can bring in
 	// will be converting from uint8 on CPU to float on GPU
@@ -1395,49 +1432,79 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim){
 	cudaMalloc(&correct_classes, n_images * sizeof(int));
 	batch -> correct_classes = correct_classes;
 
+	batch -> cur_shard_id = -1;
+	batch -> cur_batch_in_shard = -1;
+	batch -> shard_n_images = shard_n_images;
+	batch -> full_shard_images = (float *) malloc((size_t) shard_n_images * (size_t) image_size * sizeof(float));
+	batch -> full_shard_correct_classes = (int *) malloc(shard_n_images * sizeof(int));
+
 	return batch;
 }
 
 // (if this takes too long, can do it in parallel with separate process on cpu)
+// ASSUMING shard_n_images % batch_size = 0
 void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
+	
 	int batch_size = batch_buffer -> n_images;
 	int image_size = batch_buffer -> image_size;
-	int total_pixels = batch_size * image_size;
-	int n_classes = class_metadata -> n_classes;
-	int * counts_per_class = class_metadata -> counts;
+	size_t total_pixels = (size_t) batch_size * (size_t) image_size;
+	
+	float * full_shard_images = batch_buffer -> full_shard_images;
+	int * full_shard_correct_classes = batch_buffer -> full_shard_correct_classes;	
 
-	uint8_t * images_cpu = batch_buffer -> images_cpu;
 	float * images_float_cpu = batch_buffer -> images_float_cpu;
 	float * images = batch_buffer -> images;
 
 	int * correct_classes_cpu = batch_buffer -> correct_classes_cpu;
 	int * correct_classes = batch_buffer -> correct_classes;
 
-	// randomly select class, then randomly select image within class
-	int class_id, image_id;
-	FILE * f;
-	char file_path[66];
-	for (int i = 0; i < batch_size; i++){
-		class_id = rand() % n_classes;
-		sprintf(file_path, "/mnt/storage/data/vision/imagenet/2012/train_data/%08d.buffer", class_id);
-		file_path[65] = '\0';
-		image_id = rand() % counts_per_class[class_id];
-		f = fopen(file_path, "rb");
-		fseek(f, image_id * image_size, SEEK_SET);
-		fread(images_cpu + i * image_size, sizeof(uint8_t), (size_t) image_size, f);
-		fclose(f);
-		correct_classes_cpu[i] = class_id;
+	int cur_shard_id = batch_buffer -> cur_shard_id;
+	int cur_batch_in_shard = batch_buffer -> cur_batch_in_shard;
+	int shard_n_images = batch_buffer -> shard_n_images;
+
+
+
+	int start_img_num = cur_batch_in_shard * batch_size;
+	// cur_shard_id = -1 implies first iteration
+	if ((cur_shard_id == -1) || (start_img_num >= shard_n_images)) {
+
+		// update new shard id
+		cur_shard_id += 1;
+		batch_buffer -> cur_shard_id = cur_shard_id;
+
+		// load new shard into RAM
+		char shard_images_filepath[68];
+		sprintf(shard_images_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.images", cur_shard_id);
+		shard_images_filepath[67] = '\0';
+		FILE * shard_images_file = fopen(shard_images_filepath, "rb");
+		fread(full_shard_images, sizeof(float), ((size_t) shard_n_images) * ((size_t) image_size), shard_images_file);
+		fclose(shard_images_file);
+
+
+		char shard_labels_filepath[68];
+		sprintf(shard_labels_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.labels", cur_shard_id);
+		shard_labels_filepath[67] = '\0';
+		FILE * shard_labels_file = fopen(shard_labels_filepath, "rb");
+		fread(full_shard_correct_classes, sizeof(int), shard_n_images, shard_labels_file);
+		fclose(shard_labels_file);
+
+		// reset cur batch in shard to 0
+		cur_batch_in_shard = 0;
+		batch_buffer -> cur_batch_in_shard = cur_batch_in_shard;
 	}
 
-	// array is linear format where each sequence of image_size [0, image_size) is image 1, then [image_size, 2 * image_size) has image 2
-	// each image is also linearized where ording of pixels is - 0, 0: (R, G, B) then 0, 1: (R,G,B), ...
+	// load current batch
+	memcpy(images_float_cpu, full_shard_images + cur_batch_in_shard * total_pixels, total_pixels * sizeof(float));
+	memcpy(correct_classes_cpu, full_shard_correct_classes + cur_batch_in_shard * batch_size, batch_size * sizeof(int));
 
-	for (int pixel = 0; pixel < total_pixels; pixel++){
-		images_float_cpu[pixel] = ((float) (images_cpu[pixel])) * (2.0 / 255) - 1;
-	}
+	// copy current batch to GPU
 
 	cudaMemcpy(images, images_float_cpu, total_pixels * sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemcpy(correct_classes, correct_classes_cpu, batch_size * sizeof(int), cudaMemcpyHostToDevice);
+
+	// update cur batch for next iteration of loading
+	cur_batch_in_shard++;
+	batch_buffer -> cur_batch_in_shard = cur_batch_in_shard;
 
 }
 
@@ -1590,7 +1657,7 @@ void prepareAndDoMatMulLeftTranspose(const float * left_orig, const float * righ
 	cudaMalloc(&temp_left, left_orig_rows * left_orig_cols * sizeof(float));
 
 	dim3 gridDimTranspose(ceil((float) left_orig_rows / TILE_WIDTH), ceil((float)left_orig_cols / TILE_WIDTH));
-	dim3 blockDimTranspose(TILE_WIDTH, BLOCK_ROWS);
+	dim3 blockDimTranspose(TILE_WIDTH, TILE_WIDTH);
 	transpose <<< gridDimTranspose, blockDimTranspose >>> (left_orig, left_orig_rows, left_orig_cols, temp_left);
 
 	dim3 gridDimMatMul(ceil((float) left_orig_cols / TILE_WIDTH), ceil((float) right_cols / TILE_WIDTH));
@@ -1604,7 +1671,7 @@ void prepareAndDoMatMulRightTranspose(const float * left, const float * right_or
 	cudaMalloc(&temp_right, right_orig_rows * right_orig_cols * sizeof(float));
 	
 	dim3 gridDimTranspose(ceil((float) right_orig_rows / TILE_WIDTH), ceil((float)right_orig_cols / TILE_WIDTH));
-	dim3 blockDimTranspose(TILE_WIDTH, BLOCK_ROWS);
+	dim3 blockDimTranspose(TILE_WIDTH, TILE_WIDTH);
 
 	transpose <<< gridDimTranspose, blockDimTranspose >>> (right_orig, right_orig_rows, right_orig_cols, temp_right);
 	
@@ -1899,7 +1966,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 	// divide by the batch size because loss is sum across all batches...
 	// NOT SURE IF WE WANT TO DO AVERAGE HERE OR NOT...?
-	//averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
+	averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
 
 	printDeviceData("CROSS ENTROPY DERIV", output_layer_deriv, print_size);
 
@@ -2351,9 +2418,131 @@ void update_parameters(Train_ResNet * trainer){
 	}
 }
 
+void testTranspose(){
+
+	int orig_rows = max(1, rand() % 2048);
+	int orig_cols = max(1, rand() % 2048);
+
+	float * origMat_host = (float *) malloc(orig_rows * orig_cols * sizeof(float));
+	for (int i = 0; i < orig_rows; i++){
+		for (int j = 0; j < orig_cols; j++){
+			origMat_host[i * orig_cols + j] = ((float)(rand())/(float)(RAND_MAX));
+		}
+	}
+
+	float * devOrigMat;
+	cudaMalloc(&devOrigMat, orig_rows * orig_cols * sizeof(float));
+	cudaMemcpy(devOrigMat, origMat_host, orig_rows * orig_cols * sizeof(float), cudaMemcpyHostToDevice);
+
+	float * devTrans;
+	cudaMalloc(&devTrans, orig_cols * orig_rows * sizeof(float));
+
+	dim3 gridDimTranspose(ceil((float) orig_rows / TILE_WIDTH), ceil((float) orig_cols / TILE_WIDTH));
+	dim3 blockDimTranspose(TILE_WIDTH, TILE_WIDTH);
+	transpose <<< gridDimTranspose, blockDimTranspose >>> (devOrigMat, orig_rows, orig_cols, devTrans);
+
+	float *matTrans_host = (float *) malloc(orig_cols * orig_rows * sizeof(float));
+
+	cudaMemcpy(matTrans_host, devTrans, orig_cols * orig_rows * sizeof(float), cudaMemcpyDeviceToHost);
+
+	cudaFree(devOrigMat);
+	cudaFree(devTrans);
+
+	for (int i = 0; i < orig_cols; i++){
+		for (int j = 0; j < orig_rows; j++){
+			if (origMat_host[j * orig_cols + i] != matTrans_host[i * orig_rows + j]){
+				printf("TRANSPOSE ERROR: @ original row: %d, original col: %d\n", j, i);
+			}
+		}
+	}
+
+	free(origMat_host);
+	free(matTrans_host);
+}
+
+
+void testMatMul(){
+
+	int m = max(1, rand() % 512);
+	int k = max(1, rand() % 512);
+	int n = max(1, rand() % 512);
+
+	float * A_host = (float *) malloc(m * k * sizeof(float));
+	float * B_host = (float *) malloc(k * n * sizeof(float));
+	float * C_host = (float *) calloc(m * n, sizeof(float));
+
+	for (int i = 0; i < m; i++){
+		for (int j = 0; j < k; j++){
+			A_host[i * k + j] = ((float)(rand())/(float)(RAND_MAX));
+		}
+	}
+
+	for (int i = 0; i < k; i++){
+		for (int j = 0; j < n; j++){
+			B_host[i * n + j] = ((float)(rand())/(float)(RAND_MAX));
+		}
+	}
+
+	for (int i = 0; i < m; i++){
+		for (int j = 0; j < n; j++){
+			for (int c = 0; c < k; c++){
+				C_host[i * n + j] += A_host[i * k + c] * B_host[c * n + j];
+			}
+		}
+	}
+
+	float * A_dev, *B_dev, *C_dev;
+	cudaMalloc(&A_dev, m * k * sizeof(float));
+	cudaMemcpy(A_dev, A_host, m * k * sizeof(float), cudaMemcpyHostToDevice);
+
+	cudaMalloc(&B_dev, k * n * sizeof(float));
+	cudaMemcpy(B_dev, B_host, k * n * sizeof(float), cudaMemcpyHostToDevice);
+
+
+	cudaMalloc(&C_dev, m * n * sizeof(float));
+
+
+	dim3 gridDimMatMul(ceil((float) m / TILE_WIDTH), ceil((float) n / TILE_WIDTH));
+	dim3 blockDimMatMul(TILE_WIDTH, TILE_WIDTH);
+
+	matMul <<< gridDimMatMul, blockDimMatMul >>> (A_dev, B_dev, m, k, n, C_dev);
+
+	float * C_kern_result = (float *) malloc(m * n * sizeof(float));
+
+	cudaMemcpy(C_kern_result, C_dev, m * n * sizeof(float), cudaMemcpyDeviceToHost);
+
+	for (int i = 0; i < m; i++){
+		for (int j = 0; j < n; j++){
+			if (C_kern_result[i * n + j] != C_host[i * n + j]){
+				printf("MatMul ERROR: @ row: %d, col: %d\n", j, i);
+				printf("CPU Result: %f\n", C_host[i * n + j]);
+				printf("GPU Result: %f\n\n", C_kern_result[i * n + j]);
+			}
+		}
+	}
+
+	cudaFree(A_dev);
+	cudaFree(B_dev);
+	cudaFree(C_dev);
+
+	free(A_host);
+	free(B_host);
+	free(C_host);
+	free(C_kern_result);
+
+}
+
 
 
 int main(int argc, char *argv[]) {
+
+	bool debug = false;
+
+	if (debug){
+		testMatMul();
+		testTranspose();
+		return 0;
+	}
 
 	int N_CLASSES = 1000;
 	
@@ -2399,14 +2588,18 @@ int main(int argc, char *argv[]) {
 	// INITIALIZING TRAINING
 
 	// Batch Structure (will be modified every iteration of every epoch)
+	
+	// given when we generated shards...
+	int SHARD_N_IMAGES = 32768;
+
 	int BATCH_SIZE = 32;
 	// dimensions of INPUT_DIM X INPUT_DIM x 3 color channels
 	int IMAGE_SIZE = INPUT_DIM * INPUT_DIM * 3;
-	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE, INPUT_DIM);
+	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE, INPUT_DIM, SHARD_N_IMAGES);
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.0001;
+	float LEARNING_RATE = 0.00001;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
 	float EPS = 0.0000001;
