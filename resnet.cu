@@ -874,15 +874,17 @@ __global__ void updateVars(int size, const float * gradients, float base_var_dec
 }
 
 // assume large 1-D launch
-__global__ void updateParams(int size, float * model_params, const float * means, const float * vars, float alpha_t, float eps){
+__global__ void updateParams(int size, float * model_params, const float * means, const float * vars, float alpha_t, float cur_mean_decay, float cur_var_decay, float eps){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
 		return;
 	}
-	model_params[i] = model_params[i] - alpha_t * means[i] / (sqrtf(vars[i]) + eps);
+	float bias_corrected_mean = means[i] / (1 - cur_mean_decay);
+	float bias_corrected_var = vars[i] / (1 - cur_var_decay);
+	model_params[i] = model_params[i] - alpha_t * bias_corrected_mean / (sqrtf(bias_corrected_var) + eps);
 	if (isnan(model_params[i])){
 		printf("ERROR: Set Param to nan at index: %d...resetting to 0\n", i);
-		model_params[i] = 0;
+		return;
 	}
 }
 
@@ -2463,7 +2465,7 @@ void update_parameters(Train_ResNet * trainer){
 
 		updateMeans <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_mean_decay, mean_location);
 		updateVars <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_var_decay, var_location);
-		updateParams <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, model_location, mean_location, var_location, alpha_t, eps);
+		updateParams <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, model_location, mean_location, var_location, alpha_t, cur_mean_decay, cur_var_decay, eps);
 
 		cudaMemset(grad_location, 0, param_size * sizeof(float));
 	}
