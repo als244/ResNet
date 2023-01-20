@@ -851,7 +851,12 @@ __global__ void updateMeans(int size, const float * gradients, float base_mean_d
 	if (i >= size){
 		return;
 	}
+	if (isnan(gradients[i])){
+		printf("ERROR in Update Means: Gradient is nan at index: %d...resetting keeping same mean\n", i);
+		return;
+	}
 	prev_means[i] = base_mean_decay * prev_means[i] + (1 - base_mean_decay) * gradients[i];
+	
 }
 
 // assume large 1-D launch
@@ -861,6 +866,10 @@ __global__ void updateVars(int size, const float * gradients, float base_var_dec
 		return;
 	}
 	float grad = gradients[i];
+	if (isnan(grad)){
+		printf("ERROR in Update Vars: Gradient is nan at index: %d...resetting keeping same var\n", i);
+		return;
+	}
 	prev_vars[i] = base_var_decay * prev_vars[i] + (1 - base_var_decay) * grad * grad;
 }
 
@@ -872,7 +881,8 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	}
 	model_params[i] = model_params[i] - alpha_t * means[i] / (sqrtf(vars[i]) + eps);
 	if (isnan(model_params[i])){
-		printf("Set Param to nan at index: %d\n", i);
+		printf("ERROR: Set Param to nan at index: %d...resetting to 0\n", i);
+		model_params[i] = 0;
 	}
 }
 
@@ -2646,7 +2656,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.0001;
+	float LEARNING_RATE = 0.00002;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
 	float EPS = 0.0000001;
@@ -2723,10 +2733,10 @@ int main(int argc, char *argv[]) {
 				}
 			}
 			epoch_n_wrong += batch_n_wrong;
-			batch_accuracy = ((float) BATCH_SIZE - batch_n_wrong) / ((float) BATCH_SIZE);
+			batch_accuracy = 100 * ((float) BATCH_SIZE - batch_n_wrong) / ((float) BATCH_SIZE);
 
 			if (iter % PRINT_FREQ == 0){
-				printf("\nEpoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.4f\n\n", epoch, iter, avg_batch_loss, batch_accuracy);
+				printf("\nEpoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.2f\n\n", epoch, iter, avg_batch_loss, batch_accuracy);
 			}
 
 			/* DO BACKPROP */
