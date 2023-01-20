@@ -18,6 +18,7 @@
 #define CUDA_BATCH_SIZE 32
 #define MAX_SHARED_MEMORY 48000
 #define MAX_SHARED_MEM_FLOATS 12000
+#define MAX_THREAD_PER_BLOCK_INCL_REG 512
 
 // used to hide all print statements for device data
 #define TO_PRINT false
@@ -249,13 +250,13 @@ __global__ void transpose(const float *in, int rows, int cols, float * out) {
 // not bothering with shared memory for now...
 
 // Independent over (output_filter_id, output_spatial_row, output_spatial_col, sample)
-// Launch with gridDim (out_spatial_dim, out_spatial_dim, out_filter) and blockDim (batch_size)
+// Launch with gridDim (out_spatial_dim, out_spatial_dim, max(1, out_filters / (MAX_THREAD_PER_BLOCK)) and blockDim (batch_size, min(MAX_THREAD_PER_BLOCK / batch_size, output_filters))
 // Room to optimize a lot...
 __global__ void doConvolution(const float * input, const float * weights, const float * biases, int spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, float * out){
 
 	int out_spatial_row = blockIdx.x;
 	int out_spatial_col = blockIdx.y;
-	int out_filter_id = blockIdx.z;
+	int out_filter_id = blockIdx.z * blockDim.y + threadIdx.y;
 	int sample_ind = threadIdx.x;
 	int out_spatial_dim = spatial_dim / stride;
 
@@ -306,14 +307,14 @@ __global__ void doConvolution(const float * input, const float * weights, const 
 
 // Independent over (input filter, input_x, input_y, sample)
 // could use shared memory over conv weights...
-// Launch with gridDim (spatial_dim, spatial_dim, input_filters) and blockDim (batch_size)
+// Launch with gridDim (spatial_dim, spatial_dim, max(1, input_filters / (MAX_THREAD_PER_BLOCK / batch_size))) and blockDim (batch_size, min(MAX_THREAD_PER_BLOCK / batch_size, input_filters))
 // Can parallelize further with reductions, if want to optimize
 __global__ void convolutionDerivInput(const float * input, const float * weights, const float * out_deriv, int spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, bool toAdd,
 											float * input_deriv){
 
 	int spatial_row = blockIdx.x;
 	int spatial_col = blockIdx.y;
-	int in_filter_id = blockIdx.z;
+	int in_filter_id = blockIdx.z * blockDim.y + threadIdx.y;
 	int sample_ind = threadIdx.x;
 	// shouldn't need to check based on launch specs, but will anyways...
 	if ((spatial_row >= spatial_dim) || (spatial_col >= spatial_dim) || (in_filter_id >= in_filters) || (sample_ind >= batch_size)){
@@ -368,15 +369,22 @@ __global__ void convolutionDerivInput(const float * input, const float * weights
 
 // Independent over (input filter, output filter, kern_x, kern_x)
 // could use shared memory over input values...
-// Launch with gridDim (input_filters, output_filters) and blockDim (kern_dim, kern_dim)
+// Launch with gridDim (kern_dim, kern_dim, output_filters) and blockDim (input_filters) [if input_filters > MAX_THREAD_PER_BLOCK switch ordering of input_filters and output_filters in launch]
 __global__ void convolutionDerivWeights(const float * input, const float * weights, const float * out_deriv, int spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size,
-											float * weight_deriv){
+											float * weight_deriv, bool is_block_dim_inp){
 
-	int in_filter_id = blockIdx.x;
-	int out_filter_id = blockIdx.y;
-
-	int kern_row = threadIdx.x;
-	int kern_col = threadIdx.y;
+	int in_filter_id;
+	int out_filter_id;
+	if (is_block_dim_inp){
+		in_filter_id = threadIdx.x;
+		out_filter_id = blockIdx.z;
+	}
+	else{
+		in_filter_id = blockIdx.z;
+		out_filter_id = threadIdx.x;
+	}
+	int kern_row = blockIdx.x;
+	int kern_col = blockIdx.y;
 
 	// shouldn't need to check based on launch specs, but will anyways...
 	if ((in_filter_id >= in_filters) || (out_filter_id >= out_filters) || (kern_row >= kern_dim) || (kern_col >= kern_dim)){
@@ -419,6 +427,7 @@ __global__ void convolutionDerivWeights(const float * input, const float * weigh
 }
 
 
+
 // FOR NOW KEEP NAIVE (UN-OPTIMIZED)...
 // not bothering with shared memory for now...
 // Independent over (out_filters)
@@ -457,7 +466,7 @@ __global__ void convolutionDerivBiases(const float * input, const float * weight
 __global__ void doBatchNormAndActivate(const float * input, const float * gamma, const float * beta,
 								int spatial_dim, int filters, int batch_size, float eps, float * means, float * vars, float * normalized_temp, float * normalized, float * activated){
 
-	int filter_id = blockIdx.x;
+	int filter_id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (filter_id >= filters){
 		return;
 	}
@@ -514,8 +523,8 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 									int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars, const float * normalized_temp, const float * activated,
 									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * input_deriv){
 	
-	int filter_id = blockIdx.x;
-	// shouldn't happen based on launch spec, but check anyways...
+	
+	int filter_id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (filter_id >= filters){
 		return;
 	}
@@ -1417,16 +1426,21 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim, int shar
 	// in resnet-50 will be 224 * 224 * 3
 	batch -> image_size = image_size;
 	batch -> image_dim = image_dim;
-	// load batch by first brining into cpu
-	batch -> images_float_cpu = (float *) malloc((size_t) n_images * (size_t) image_size * sizeof(float));
-
+	float * images_float_cpu;
+	// load batch by first brining into cpu, pinned memory
+	cudaError_t status_images_pinned = cudaMallocHost((float **)&images_float_cpu, (size_t) n_images * (size_t) image_size * sizeof(float));
+	batch -> images_float_cpu = images_float_cpu;
+	
 	// allocate memory on gpu so that after loaded on cpu can bring in
 	// will be converting from uint8 on CPU to float on GPU
 	float * images;
-	cudaMalloc(&images, n_images * image_size * sizeof(float));
+	cudaMalloc(&images, (size_t) n_images * (size_t) image_size * sizeof(float));
 	batch -> images = images;
 
-	batch -> correct_classes_cpu = (int *) malloc(n_images * sizeof(int));
+	// pinned memory for correct_classes_cpu
+	int * correct_classes_cpu;
+	cudaError_t status_classes_pinned = cudaMallocHost((int **)&correct_classes_cpu, n_images * sizeof(int));
+	batch -> correct_classes_cpu = correct_classes_cpu;
 
 	int * correct_classes;
 	cudaMalloc(&correct_classes, n_images * sizeof(int));
@@ -1591,8 +1605,11 @@ void prepareAndDoConvolution(int in_spatial_dim, int kern_dim, int in_filters, i
 																float * input, float * weights, float * biases, float * output){
 	
 	int out_spatial_dim = in_spatial_dim / stride;
-	dim3 gridDimConv(out_spatial_dim, out_spatial_dim, out_filters);
-	dim3 blockDimConv(batch_size);
+	int out_filters_block = min(MAX_THREAD_PER_BLOCK / batch_size, out_filters);
+	int out_filters_grid = max(1, (int) ceil((float) in_filters / (float) out_filters_block));
+
+	dim3 gridDimConv(out_spatial_dim, out_spatial_dim, out_filters_grid);
+	dim3 blockDimConv(batch_size, out_filters_block);
 
 	doConvolution <<< gridDimConv, blockDimConv>>> (input, weights, biases, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, output);
 }
@@ -1603,15 +1620,31 @@ void prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filter
 												float * input_deriv, float * weight_deriv, float * bias_deriv, bool toComputeInputDeriv){
 	
 	// first layer conv doesn't take deriv w.r.t input
-	dim3 gridDimDerivInput(in_spatial_dim, in_spatial_dim, in_filters);
-	dim3 blockDimDerivInput(batch_size);
+	int in_filters_block = min(MAX_THREAD_PER_BLOCK / batch_size, in_filters);
+	int in_filters_grid = max(1, (int) ceil((float) in_filters / (float) in_filters_block));
+
+	dim3 gridDimDerivInput(in_spatial_dim, in_spatial_dim, in_filters_grid);
+	dim3 blockDimDerivInput(batch_size, in_filters_block);
 	if (toComputeInputDeriv){
 		convolutionDerivInput <<< gridDimDerivInput, blockDimDerivInput >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, toAdd, input_deriv);
 	}
 
-	dim3 gridDimDerivWeights(in_filters, out_filters);
-	dim3 blockDimDerivWeights(kern_dim, kern_dim);
-	convolutionDerivWeights <<< gridDimDerivWeights, blockDimDerivWeights >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv);
+	int block_dim, grid_dim;
+	bool is_block_dim_inp;
+	if (in_filters > MAX_THREAD_PER_BLOCK){
+		block_dim = out_filters;
+		grid_dim = in_filters;
+		is_block_dim_inp = false;
+	}
+	else{
+		block_dim = in_filters;
+		grid_dim = out_filters;
+		is_block_dim_inp = true;
+	}
+	
+	dim3 gridDimDerivWeights(kern_dim, kern_dim, grid_dim);
+	dim3 blockDimDerivWeights(block_dim);
+	convolutionDerivWeights <<< gridDimDerivWeights, blockDimDerivWeights >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv, is_block_dim_inp);
 
 	convolutionDerivBiases <<< out_filters, 1 >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, bias_deriv);
 	
@@ -1630,7 +1663,12 @@ void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_Batch
 	float * normalized_temp_out = batch_norm_cache -> normalized_temp;
 	float * normalized_out = batch_norm_cache -> normalized;
 
-	doBatchNormAndActivate<<< filters, 1 >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, normalized_temp_out, normalized_out, activated_out);
+	int num_threads = min(MAX_THREAD_PER_BLOCK_INCL_REG, filters);
+	int num_blocks = 1;
+	if (filters > num_threads){
+		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
+	}
+	doBatchNormAndActivate<<< num_blocks, num_threads >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, normalized_temp_out, normalized_out, activated_out);
 }
 
 void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
@@ -1647,7 +1685,12 @@ void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cach
 	float * gamma_deriv = batch_norm_param_derivs -> gamma;
 	float * beta_deriv = batch_norm_param_derivs -> beta;
 
-	activationAndBatchNormDeriv <<< (filters), (1) >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv);
+	int num_threads = min(MAX_THREAD_PER_BLOCK_INCL_REG, filters);
+	int num_blocks = 1;
+	if (filters > num_threads){
+		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
+	}
+	activationAndBatchNormDeriv <<< num_blocks, num_threads >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv);
 
 
 }
@@ -1689,9 +1732,7 @@ void printDeviceData(const char * name_of_variable, float * device_variable, int
 		printf("VARIABLE NAME: %s\n\n", name_of_variable);
 		printf("DATA:\n");
 		for (int i = 0; i < size; i++){
-			if ((cpu_data[i] > 10) || (cpu_data[i] < -10) || (isnan(cpu_data[i])) || (isinf(cpu_data[i]))) {
-				printf("%d: %f\n", i, cpu_data[i]);
-			}
+			printf("%d: %f\n", i, cpu_data[i]);
 		}
 		printf("\n\n\n");
 		free(cpu_data);
@@ -1905,7 +1946,7 @@ void forward_pass(Train_ResNet * trainer){
 	// format of output is each row is a sample and has a row size of 2048
 	doFilterAvgPool <<< (final_filters), (batch_size) >>> (final_conv_block_output, final_spatial_dim, final_avg_pool_values);
 
-	printDeviceData("FINAL AVG POOL VALUES", final_avg_pool_values, batch_size * 2048);
+	printDeviceData("FINAL AVG POOL VALUES", final_avg_pool_values, print_size);
 
 
 	// APPLY FULLY CONNECTED LAYER BETWEEN (2048, 1000)
@@ -1923,8 +1964,8 @@ void forward_pass(Train_ResNet * trainer){
 
 	matMul <<< (gridDimFCOutput), (blockDimFCOutput) >>> (final_avg_pool_values, fc_weights, batch_size, final_filters, output_dim, fc_output);
 
-	printDeviceData("FULLY CONNECTED WEIGHTS", fc_weights, 2048 * 1000);
-	printDeviceData("FULLY CONNECTED OUTPUT", fc_output, batch_size * 1000);
+	printDeviceData("FULLY CONNECTED WEIGHTS", fc_weights, print_size);
+	printDeviceData("FULLY CONNECTED OUTPUT", fc_output, print_size);
 
 	// DO SOFTMAX
 	float * pred = trainer -> forward_buffer -> pred;
@@ -2416,6 +2457,12 @@ void update_parameters(Train_ResNet * trainer){
 
 		cudaMemset(grad_location, 0, param_size * sizeof(float));
 	}
+
+	// reset images and classes before next cudaMemcpy
+	size_t batch_size = (size_t) trainer -> batch_size;
+	size_t image_size = (size_t) trainer -> cur_batch -> image_size;
+	cudaMemset(trainer -> cur_batch -> images, 0, batch_size * image_size * sizeof(float));
+	cudaMemset(trainer -> cur_batch -> correct_classes, 0, batch_size * sizeof(int));
 }
 
 void testTranspose(){
@@ -2599,7 +2646,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.00001;
+	float LEARNING_RATE = 0.0001;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
 	float EPS = 0.0000001;
@@ -2621,6 +2668,8 @@ int main(int argc, char *argv[]) {
 
 	int PRINT_FREQ = 1;
 
+	cudaError_t status;
+
 	for (int epoch = 0; epoch < N_EPOCHS; epoch++){
 		epoch_loss = 0;
 		epoch_n_wrong = 0;
@@ -2633,6 +2682,9 @@ int main(int argc, char *argv[]) {
 			// values go into trainer -> cur_batch -> [images_cpu|images_float_cpu|images|correct_classes_cpu|correct_classes]
 			load_new_batch(class_metadata, trainer -> cur_batch);
 
+			cudaDeviceSynchronize();
+			status = cudaGetLastError();
+			//printf("Status after loading batch: %s\n\n", cudaGetErrorString(status));
 			
 
 			/* DO FORWARD PROP */
@@ -2640,7 +2692,11 @@ int main(int argc, char *argv[]) {
 			printf("Making Predictions...\n");
 			forward_pass(trainer);
 
+			cudaDeviceSynchronize();
+			status = cudaGetLastError();
+			//printf("Status after forward pass: %s\n\n", cudaGetErrorString(status));
 			
+
 			/* RECORD LOSS AND ACCURACY */
 
 			// dimensions of pred: (N_CLASSES, BATCH_SIZE)
@@ -2660,7 +2716,7 @@ int main(int argc, char *argv[]) {
 			for (int s = 0; s < BATCH_SIZE; s++){
 				val_pred_correct = pred[correct[s] * BATCH_SIZE + s];
 				for (int c = 0; c < N_CLASSES; c++){
-					if (pred[c * BATCH_SIZE + s] >= val_pred_correct){
+					if ((c != correct[s]) && (pred[c * BATCH_SIZE + s] >= val_pred_correct)){
 						batch_n_wrong++;
 						break;
 					}
@@ -2677,9 +2733,18 @@ int main(int argc, char *argv[]) {
 			printf("Backprop to Compute Derivs...\n");
 			backwards_pass(trainer);
 
+			cudaDeviceSynchronize();
+			status = cudaGetLastError();
+			//printf("Status after backwards pass: %s\n\n", cudaGetErrorString(status));
+
 			/* OPTIMIZE WEIGHTS */
 			printf("Applying Optimizer to Update Params...\n\n");
 			update_parameters(trainer);
+
+			cudaDeviceSynchronize();
+			status = cudaGetLastError();
+			//printf("Status after updating params: %s\n\n", cudaGetErrorString(status));
+
 		}
 
 		(trainer -> loss_per_epoch)[epoch] = epoch_loss;
