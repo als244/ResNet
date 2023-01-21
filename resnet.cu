@@ -503,7 +503,7 @@ __global__ void doBatchNormAndActivate(const float * input, const float * gamma,
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
 				inp_index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
-				normalized_temp_val = (input[inp_index] - mean) / sqrtf(var + eps);
+				normalized_temp_val = (input[inp_index] - mean) / (sqrtf(var) + eps);
 				normalized_temp[inp_index] = normalized_temp_val;
 				normalized_val = gamma[filter_id] * normalized_temp_val + beta[filter_id];
 				normalized[inp_index] = normalized_val;
@@ -545,7 +545,7 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 			for (int j = 0; j < spatial_dim; j++){
 				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
 				activated_val = activated[index];
-				if (activated_val == 0){
+				if (activated_val <= 0){
 					normalized_temp_deriv[index] = 0;
 				}
 				else{
@@ -568,8 +568,8 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	float dMean = 0;
 	float partial_var_deriv = 0; 
 	float norm_temp_deriv_val;
-	float filt_var_three_halfs_power = -0.5 * powf(var_val + eps, -1.5);
-	float filt_var_recip_sqrt = -1.0 / sqrtf(var_val + eps);
+	float filt_var_three_halfs_power = -0.5 * (powf(var_val, -1.5) + eps);
+	float filt_var_recip_sqrt = -1.0 / (sqrtf(var_val) + eps);
 	for (int s = 0; s < batch_size; s++){
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
@@ -846,13 +846,17 @@ __global__ void crossEntropyDeriv(float * output_deriv, const int * correct_clas
 }
 
 // assume large 1-D launch
-__global__ void updateMeans(int size, const float * gradients, float base_mean_decay, float * prev_means){
+__global__ void updateMeans(int size, const float * gradients, float base_mean_decay, float * prev_means, int loc_ind){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
 		return;
 	}
 	if (isnan(gradients[i])){
-		printf("ERROR in Update Means: Gradient is nan at index: %d...resetting keeping same mean\n", i);
+		printf("ERROR in Update Means for Parameter at location: %d\nGradient is NAN at index: %d...resetting keeping same mean\n\n", loc_ind, i);
+		return;
+	}
+	if (isinf(gradients[i])){
+		printf("ERROR in Update Means for Parameter at location: %d\nGradient is INF at index: %d...resetting keeping same mean\n\n", loc_ind, i);
 		return;
 	}
 	prev_means[i] = base_mean_decay * prev_means[i] + (1 - base_mean_decay) * gradients[i];
@@ -860,30 +864,41 @@ __global__ void updateMeans(int size, const float * gradients, float base_mean_d
 }
 
 // assume large 1-D launch
-__global__ void updateVars(int size, const float * gradients, float base_var_decay, float * prev_vars){
+__global__ void updateVars(int size, const float * gradients, float base_var_decay, float * prev_vars, int loc_ind){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
 		return;
 	}
 	float grad = gradients[i];
 	if (isnan(grad)){
-		printf("ERROR in Update Vars: Gradient is nan at index: %d...resetting keeping same var\n", i);
+		printf("ERROR in Update Vars for Parameter at location: %d\nGradient is NAN at index: %d...resetting keeping same var\n", loc_ind, i);
+		return;
+	}
+	if (isinf(grad)){
+		printf("ERROR in Update Vars for Parameter at location: %d\nGradient is INF at index: %d...resetting keeping same var\n", loc_ind, i);
 		return;
 	}
 	prev_vars[i] = base_var_decay * prev_vars[i] + (1 - base_var_decay) * grad * grad;
 }
 
 // assume large 1-D launch
-__global__ void updateParams(int size, float * model_params, const float * means, const float * vars, float alpha_t, float cur_mean_decay, float cur_var_decay, float eps){
+__global__ void updateParams(int size, float * model_params, const float * means, const float * vars, float learning_rate, float cur_mean_decay, float cur_var_decay, float eps, int loc_ind){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
 		return;
 	}
 	float bias_corrected_mean = means[i] / (1 - cur_mean_decay);
 	float bias_corrected_var = vars[i] / (1 - cur_var_decay);
-	model_params[i] = model_params[i] - alpha_t * bias_corrected_mean / (sqrtf(bias_corrected_var) + eps);
+	float old_model_param = model_params[i];
+	model_params[i] = model_params[i] - learning_rate * bias_corrected_mean / (sqrtf(bias_corrected_var) + eps);
 	if (isnan(model_params[i])){
-		printf("ERROR: Set Param to nan at index: %d...resetting to 0\n", i);
+		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value\n", loc_ind, i);
+		model_params[i] = old_model_param;
+		return;
+	}
+	if (isinf(model_params[i])){
+		printf("ERROR: for Parameter at location: %d\nto INF at index: %d...resetting to prev value\n", loc_ind, i);
+		model_params[i] = old_model_param;
 		return;
 	}
 }
@@ -2453,9 +2468,6 @@ void update_parameters(Train_ResNet * trainer){
 	int param_size;
 	float *model_location, *grad_location, * mean_location, * var_location;
 	
-	// update learning rate
-	float alpha_t = learning_rate * sqrtf(1 - cur_var_decay) / (1 - cur_mean_decay);
-
 	for (int i = 0; i < n_locations; i++){
 		param_size = param_sizes[i];
 		model_location = model_params_locations[i];
@@ -2463,9 +2475,9 @@ void update_parameters(Train_ResNet * trainer){
 		mean_location = prev_grad_means_locations[i];
 		var_location = prev_grad_vars_locations[i];
 
-		updateMeans <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_mean_decay, mean_location);
-		updateVars <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_var_decay, var_location);
-		updateParams <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, model_location, mean_location, var_location, alpha_t, cur_mean_decay, cur_var_decay, eps);
+		updateMeans <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_mean_decay, mean_location, i);
+		updateVars <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_var_decay, var_location, i);
+		updateParams <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, model_location, mean_location, var_location, learning_rate, cur_mean_decay, cur_var_decay, eps, i);
 
 		cudaMemset(grad_location, 0, param_size * sizeof(float));
 	}
@@ -2658,7 +2670,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.00002;
+	float LEARNING_RATE = 0.00001;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
 	float EPS = 0.0000001;
