@@ -890,7 +890,7 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	float bias_corrected_mean = means[i] / (1 - cur_mean_decay);
 	float bias_corrected_var = vars[i] / (1 - cur_var_decay);
 	float old_model_param = model_params[i];
-	model_params[i] = model_params[i] - learning_rate * bias_corrected_mean / sqrtf(bias_corrected_var + eps);
+	model_params[i] = model_params[i] - learning_rate * bias_corrected_mean / (sqrtf(bias_corrected_var) + eps);
 	if (isnan(model_params[i])){
 		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value\n", loc_ind, i);
 		model_params[i] = old_model_param;
@@ -2673,7 +2673,7 @@ int main(int argc, char *argv[]) {
 	float LEARNING_RATE = 0.00001;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
-	float EPS = 0.0000001;
+	float EPS = 0.00000001;
 	float N_EPOCHS = 1;
 
 	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS);
