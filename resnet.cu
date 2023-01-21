@@ -852,11 +852,11 @@ __global__ void updateMeans(int size, const float * gradients, float base_mean_d
 		return;
 	}
 	if (isnan(gradients[i])){
-		printf("ERROR in Update Means for Parameter at location: %d\nGradient is NAN at index: %d...resetting keeping same mean\n\n", loc_ind, i);
+		printf("ERROR in Update Means for Parameter at location: %d\nGradient is NAN at index: %d...keeping same running mean\n\n", loc_ind, i);
 		return;
 	}
 	if (isinf(gradients[i])){
-		printf("ERROR in Update Means for Parameter at location: %d\nGradient is INF at index: %d...resetting keeping same mean\n\n", loc_ind, i);
+		printf("ERROR in Update Means for Parameter at location: %d\nGradient is INF at index: %d...keeping same running mean\n\n", loc_ind, i);
 		return;
 	}
 	prev_means[i] = base_mean_decay * prev_means[i] + (1 - base_mean_decay) * gradients[i];
@@ -871,11 +871,11 @@ __global__ void updateVars(int size, const float * gradients, float base_var_dec
 	}
 	float grad = gradients[i];
 	if (isnan(grad)){
-		printf("ERROR in Update Vars for Parameter at location: %d\nGradient is NAN at index: %d...resetting keeping same var\n", loc_ind, i);
+		printf("ERROR in Update Vars for Parameter at location: %d\nGradient is NAN at index: %d...keeping same running var\n", loc_ind, i);
 		return;
 	}
 	if (isinf(grad)){
-		printf("ERROR in Update Vars for Parameter at location: %d\nGradient is INF at index: %d...resetting keeping same var\n", loc_ind, i);
+		printf("ERROR in Update Vars for Parameter at location: %d\nGradient is INF at index: %d...keeping same running var\n", loc_ind, i);
 		return;
 	}
 	prev_vars[i] = base_var_decay * prev_vars[i] + (1 - base_var_decay) * grad * grad;
