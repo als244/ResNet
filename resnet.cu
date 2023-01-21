@@ -503,7 +503,7 @@ __global__ void doBatchNormAndActivate(const float * input, const float * gamma,
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
 				inp_index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
-				normalized_temp_val = (input[inp_index] - mean) / (sqrtf(var) + eps);
+				normalized_temp_val = (input[inp_index] - mean) / sqrtf(var + eps);
 				normalized_temp[inp_index] = normalized_temp_val;
 				normalized_val = gamma[filter_id] * normalized_temp_val + beta[filter_id];
 				normalized[inp_index] = normalized_val;
@@ -568,8 +568,8 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	float dMean = 0;
 	float partial_var_deriv = 0; 
 	float norm_temp_deriv_val;
-	float filt_var_three_halfs_power = -0.5 * (powf(var_val, -1.5) + eps);
-	float filt_var_recip_sqrt = -1.0 / (sqrtf(var_val) + eps);
+	float filt_var_three_halfs_power = -0.5 * powf(var_val + eps, -1.5);
+	float filt_var_recip_sqrt = -1.0 / sqrtf(var_val + eps);
 	for (int s = 0; s < batch_size; s++){
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
@@ -890,7 +890,7 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	float bias_corrected_mean = means[i] / (1 - cur_mean_decay);
 	float bias_corrected_var = vars[i] / (1 - cur_var_decay);
 	float old_model_param = model_params[i];
-	model_params[i] = model_params[i] - learning_rate * bias_corrected_mean / (sqrtf(bias_corrected_var) + eps);
+	model_params[i] = model_params[i] - learning_rate * bias_corrected_mean / sqrtf(bias_corrected_var + eps);
 	if (isnan(model_params[i])){
 		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value\n", loc_ind, i);
 		model_params[i] = old_model_param;
