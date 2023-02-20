@@ -1105,7 +1105,7 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 	params -> init_conv_layer = init_conv_layer;
 	int loc_ind = 0;
 	locations[loc_ind] = init_conv_layer;
-	sizes[loc_ind] = init_kernel_dim * init_kernel_dim * init_conv_filters;
+	sizes[loc_ind] = init_kernel_dim * init_kernel_dim * init_conv_filters * 3;
 	loc_ind++;
 
 	float * bias_init_conv;
