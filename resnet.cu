@@ -1082,7 +1082,7 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 	int output_dim = model_dims -> output;
 
 	// init array to hold pointers to weights
-	// 3 * 4 weight arrays per conv block (weights, biases, gamma, beta per layer in block) + 4 * inital + fully connected + 4 * 2 projections
+	// 3 * 4 weight arrays per conv block (weights, biases, gamma, beta per layer in block) + 4 * inital + fully connected + 4 projections * 2
 	// ignoring biases + batch norm weights for now...
 	int n_locations = 13 + 12 * n_conv_blocks;
 	params -> n_locations = n_locations;
@@ -1210,6 +1210,7 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 		}
 		incoming_filters = expanded_depth;
 	}
+	printf("Loc Ind: %d\n", loc_ind);
 	params -> conv_blocks = conv_blocks;
 
 	float * fully_connected;
@@ -2489,7 +2490,7 @@ void update_parameters(Train_ResNet * trainer){
 	int param_size;
 	float *model_location, *grad_location, * mean_location, * var_location;
 	
-	for (int i = 0; i < n_locations; i++){
+	for (int i = n_locations - 1; i >= 0; i--){
 		param_size = param_sizes[i];
 		model_location = model_params_locations[i];
 		grad_location = current_gradient_locations[i];
