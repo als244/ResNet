@@ -1049,7 +1049,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 		cudaMalloc(&projection, projection_size * sizeof(float));
 		cudaMemset(projection, 0, projection_size * sizeof(float));
 		if (!is_zero){
-			init_weights_gaussian_device(gen, projection_size, projection, 0, 2.0 / incoming_filters);
+			init_weights_gaussian_device(gen, projection_size, projection, 0, 2.0 / (incoming_spatial_dim * incoming_spatial_dim * incoming_filters));
 		}
 		cudaMalloc(&bias_projection, expanded_depth * sizeof(float));
 		cudaMemset(bias_projection, 0, expanded_depth * sizeof(float));
