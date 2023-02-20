@@ -1210,7 +1210,6 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 		}
 		incoming_filters = expanded_depth;
 	}
-	printf("Loc Ind: %d\n", loc_ind);
 	params -> conv_blocks = conv_blocks;
 
 	float * fully_connected;
