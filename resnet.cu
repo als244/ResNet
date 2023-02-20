@@ -2808,10 +2808,10 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.00001;
+	float LEARNING_RATE = 0.000001;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
-	float EPS = 0.00000001;
+	float EPS = 0.0000001;
 	float N_EPOCHS = 1;
 
 	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS);
