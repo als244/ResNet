@@ -20,6 +20,9 @@
 #define MAX_SHARED_MEM_FLOATS 12000
 #define MAX_THREAD_PER_BLOCK_INCL_REG 512
 
+
+
+
 // used to hide all print statements for device data
 #define TO_PRINT false
 
@@ -29,6 +32,14 @@
 #define CURAND_CALL(x) do { if((x) != CURAND_STATUS_SUCCESS) { \
 	printf("Error at %s:%d\n",__FILE__,__LINE__);\
 	return EXIT_FAILURE;}} while(0)
+
+
+/* DECLARING FUNCTIONS HERE */
+void testConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_filters,  int stride, int batch_size, 
+																float * input, float * weights, float * biases, float * output);
+
+
+/* START OF KERNELS/FUNCTIONS */
 
 __global__ void setVal(int size, float val, float *out){
  	int ind = blockDim.x * blockIdx.x + threadIdx.x;
@@ -1506,6 +1517,7 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 
 
 	int start_img_num = cur_batch_in_shard * batch_size;
+	int n_read;
 	// cur_shard_id = -1 implies first iteration
 	if ((cur_shard_id == -1) || (start_img_num >= shard_n_images)) {
 
@@ -1514,19 +1526,19 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 		batch_buffer -> cur_shard_id = cur_shard_id;
 
 		// load new shard into RAM
-		char shard_images_filepath[68];
+		char shard_images_filepath[100];
 		sprintf(shard_images_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.images", cur_shard_id);
 		shard_images_filepath[67] = '\0';
 		FILE * shard_images_file = fopen(shard_images_filepath, "rb");
-		fread(full_shard_images, sizeof(float), ((size_t) shard_n_images) * ((size_t) image_size), shard_images_file);
+		n_read = fread(full_shard_images, sizeof(float), ((size_t) shard_n_images) * ((size_t) image_size), shard_images_file);
 		fclose(shard_images_file);
 
 
-		char shard_labels_filepath[68];
+		char shard_labels_filepath[100];
 		sprintf(shard_labels_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.labels", cur_shard_id);
 		shard_labels_filepath[67] = '\0';
 		FILE * shard_labels_file = fopen(shard_labels_filepath, "rb");
-		fread(full_shard_correct_classes, sizeof(int), shard_n_images, shard_labels_file);
+		n_read = fread(full_shard_correct_classes, sizeof(int), shard_n_images, shard_labels_file);
 		fclose(shard_labels_file);
 
 		// reset cur batch in shard to 0
@@ -1537,6 +1549,16 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	// load current batch
 	memcpy(images_float_cpu, full_shard_images + cur_batch_in_shard * total_pixels, total_pixels * sizeof(float));
 	memcpy(correct_classes_cpu, full_shard_correct_classes + cur_batch_in_shard * batch_size, batch_size * sizeof(int));
+
+	
+	/* SAVING BATCH TO FILES FOR INSPECTION... */
+	// FILE * test_images_file = fopen("images.buffer", "wb");
+	// fwrite(images_float_cpu, sizeof(float), total_pixels, test_images_file);
+	// fclose(test_images_file);
+
+	// FILE * test_labels_file = fopen("labels.buffer", "wb");
+	// fwrite(correct_classes_cpu, sizeof(int), (size_t) batch_size, test_labels_file);
+	// fclose(test_labels_file);
 
 	// copy current batch to GPU
 
@@ -1630,10 +1652,9 @@ Class_Metadata * populate_class_info(char * label_filename, char * synset_filena
 
 void prepareAndDoConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_filters,  int stride, int batch_size, 
 																float * input, float * weights, float * biases, float * output){
-	
 	int out_spatial_dim = in_spatial_dim / stride;
 	int out_filters_block = min(MAX_THREAD_PER_BLOCK / batch_size, out_filters);
-	int out_filters_grid = max(1, (int) ceil((float) in_filters / (float) out_filters_block));
+	int out_filters_grid = max(1, (int) ceil((float) out_filters / (float) out_filters_block));
 
 	dim3 gridDimConv(out_spatial_dim, out_spatial_dim, out_filters_grid);
 	dim3 blockDimConv(batch_size, out_filters_block);
@@ -2600,6 +2621,122 @@ void testMatMul(){
 	free(B_host);
 	free(C_host);
 	free(C_kern_result);
+
+}
+
+void testConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_filters,  int stride, int batch_size, 
+																float * input, float * weights, float * biases, float * output){
+
+	printf("\n\n* TESTING THE CONVOLUTION KERNEL *\n\n");
+	/* FIRST DO COMPUTATION ON GPU */
+
+	int out_spatial_dim = in_spatial_dim / stride;
+	int out_filters_block = min(MAX_THREAD_PER_BLOCK / batch_size, out_filters);
+	int out_filters_grid = max(1, (int) ceil((float) out_filters / (float) out_filters_block));
+
+	printf("Conv Params -- Batch Size: %d, In Spatial: %d, Stride: %d, Kern Dim: %d, In Filters: %d, Out Filters %d\n", batch_size, in_spatial_dim, stride, kern_dim, in_filters, out_filters);
+	printf("Launch Params -- Out Filters Block: %d, Out Filters Grid: %d\n", out_filters_block, out_filters_grid);
+	dim3 gridDimConv(out_spatial_dim, out_spatial_dim, out_filters_grid);
+	dim3 blockDimConv(batch_size, out_filters_block);
+
+	printf("Computing Convolution on GPU...\n");
+
+	doConvolution <<< gridDimConv, blockDimConv>>> (input, weights, biases, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, output);
+
+	cudaDeviceSynchronize();
+
+	float * gpu_output_on_cpu = (float *) malloc(batch_size * out_spatial_dim * out_spatial_dim * out_filters * sizeof(float));
+
+	cudaMemcpy(gpu_output_on_cpu, output, batch_size * out_spatial_dim * out_spatial_dim * out_filters * sizeof(float), cudaMemcpyDeviceToHost);
+
+	/* DO COMPUTATION ON CPU */
+	
+	// COPYING VALUES FROM GPU TO THE CPU...
+	float * input_cpu = (float *) malloc(batch_size * in_spatial_dim * in_spatial_dim * in_filters * sizeof(float));
+	cudaMemcpy(input_cpu, input, batch_size * in_spatial_dim * in_spatial_dim * in_filters * sizeof(float), cudaMemcpyDeviceToHost);
+
+	float * weights_cpu = (float *) malloc(kern_dim * kern_dim * in_filters * out_filters * sizeof(float));
+	cudaMemcpy(weights_cpu, weights, kern_dim * kern_dim * in_filters * out_filters * sizeof(float), cudaMemcpyDeviceToHost);
+
+	float * biases_cpu = (float *) malloc(out_filters * sizeof(float));
+	cudaMemcpy(biases_cpu, biases, out_filters * sizeof(float), cudaMemcpyDeviceToHost);
+
+	float * cpu_output = (float *) malloc(batch_size * out_spatial_dim * out_spatial_dim * out_filters * sizeof(float));
+
+	printf("Computing Convolution on CPU...\n");
+
+	int output_ind, in_spatial_row_start, in_spatial_col_start, in_spatial_row, in_spatial_col, input_ind, kernel_ind;
+	int half_kernel_dim = kern_dim / 2;
+	int kernel_size = in_filters * kern_dim * kern_dim;
+	float in_spatial_val;
+	for (int samp = 0; samp < batch_size; samp++){
+		for (int out_filt = 0; out_filt < out_filters; out_filt++){
+			for (int out_i = 0; out_i < out_spatial_dim; out_i++){
+				for (int out_j = 0; out_j < out_spatial_dim; out_j++){
+					output_ind = out_spatial_dim * out_spatial_dim * out_filters * samp + out_spatial_dim * out_filters * out_i + out_filters * out_j + out_filt;
+					cpu_output[output_ind] = 0;
+					in_spatial_row_start = out_i * stride;
+					in_spatial_col_start = out_j * stride;
+					for (int in_filt = 0; in_filt < in_filters; in_filt++){
+						for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim; row_offset++){
+							for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
+								// compute spatial value
+								in_spatial_row = in_spatial_row_start + row_offset;
+								in_spatial_col = in_spatial_col_start + col_offset;
+								input_ind = in_spatial_dim * in_spatial_dim * in_filters * samp + in_spatial_dim * in_filters * in_spatial_row + in_filters * in_spatial_col + in_filt;
+								kernel_ind = kern_dim * in_filters * (row_offset + half_kernel_dim) + in_filters * (col_offset + half_kernel_dim) + in_filt;
+								if ((in_spatial_row < 0) || (in_spatial_row >= in_spatial_dim) || (in_spatial_col < 0) || (in_spatial_col >= in_spatial_dim)) {
+									in_spatial_val = 0;
+								}
+								else{
+									in_spatial_val = input_cpu[input_ind];
+								}
+								// multiply with conv weight
+								// threadIdx.x specifies the output filter id
+								// kernel_ind specifies the (x, y, input_channel)
+								cpu_output[output_ind] += weights_cpu[out_filt * kernel_size + kernel_ind] * in_spatial_val;
+							}
+						}
+					}
+					cpu_output[output_ind] += biases_cpu[out_filt];
+				}
+			}
+		}
+	}
+
+	/* COMPARE RESULTS */
+	float gpu_val;
+	float cpu_val;
+	float eps = 0.0001;
+	int err_cnt = 0;
+	for (int samp = 0; samp < batch_size; samp++){
+		for (int filt = 0; filt < out_filters; filt++){
+			for (int i = 0; i < out_spatial_dim; i++){
+				for (int j = 0; j < out_spatial_dim; j++){
+					output_ind = out_spatial_dim * out_spatial_dim * out_filters * samp + out_spatial_dim * out_filters * i + out_filters * j + filt;
+					gpu_val = gpu_output_on_cpu[output_ind];
+					cpu_val = cpu_output[output_ind];
+					if ( (gpu_val < (cpu_val - eps)) || (gpu_val > (cpu_val + eps)) ){
+						printf("ERROR: GPU VALUE DIFFERS FROM CPU\n");
+						printf("Occurs at:\nSamp: %d\nFilter: %d\nRow: %d\nCol: %d\n", samp, filt, i, j);
+						printf("GPU Value:%f vs. CPU Value:%f\n\n", gpu_val, cpu_val);
+						err_cnt++;
+					}
+					if (err_cnt == 10){
+						exit(1);
+					}
+				}
+			}
+		}
+	}
+
+	/* FREE UP STUFF */
+
+	free(gpu_output_on_cpu);
+	free(input_cpu);
+	free(weights_cpu);
+	free(biases_cpu);
+	free(cpu_output);	
 
 }
 
