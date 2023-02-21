@@ -97,7 +97,7 @@ void build_shard(int shard_id, long image_dim_in, long image_dim_out, long chann
 	}
 
 	// array is linear format where each sequence of image_size [0, image_size) is image 1, then [image_size, 2 * image_size) has image 2
-	// each image is also linearized where ording of pixels is - 0, 0: (R, G, B) then 0, 1: (R,G,B), ...
+	// each image is also linearized where ording of pixels is - 0, 0: (B, G, R) then 0, 1: (B,G,R), ...
 	printf("Converting Image Bytes to Floats...\n\n");
 	float * image_floats = (float *) malloc(true_total_pixels * sizeof(float));
 	if (image_floats == NULL){
@@ -111,10 +111,11 @@ void build_shard(int shard_id, long image_dim_in, long image_dim_out, long chann
 	// }
 
 	// CONSTANTS ARE PER-PIXEL MEANS FROM IMAGENET DATASET FOUND ONLINE
+	// (Swapping Blue Channel and Red Channel For Cleanliness...)
 	for (int pixel = 0; pixel < true_total_pixels; pixel++){
 		// BLUE CHANNEL
 		if (pixel % 3 == 0){
-			image_floats[pixel] = ((float) image_bytes[pixel]) - 123.68;
+			image_floats[pixel + 2] = ((float) image_bytes[pixel]) - 123.68;
 		}
 		// GREEN CHANNEL
 		if (pixel % 3 == 1){
@@ -122,7 +123,7 @@ void build_shard(int shard_id, long image_dim_in, long image_dim_out, long chann
 		}
 		// RED CHANNEL
 		if (pixel % 3 == 2){
-			image_floats[pixel] = ((float) image_bytes[pixel]) - 103.94;
+			image_floats[pixel - 2] = ((float) image_bytes[pixel]) - 103.94;
 		}
 		
 	}
