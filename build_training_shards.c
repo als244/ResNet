@@ -105,9 +105,29 @@ void build_shard(int shard_id, long image_dim_in, long image_dim_out, long chann
 		printf("true_total_pixels: %ld\n", true_total_pixels);
 	}
 
+	// might be wrong! will instead use per-pixel mean subtractoin
+	// for (int pixel = 0; pixel < true_total_pixels; pixel++){
+	// 	image_floats[pixel] = ((float) (image_bytes[pixel])) * (2.0 / 255) - 1;
+	// }
+
+	// CONSTANTS ARE PER-PIXEL MEANS FROM IMAGENET DATASET FOUND ONLINE
 	for (int pixel = 0; pixel < true_total_pixels; pixel++){
-		image_floats[pixel] = ((float) (image_bytes[pixel])) * (2.0 / 255) - 1;
+		// BLUE CHANNEL
+		if (pixel % 3 == 0){
+			image_floats[pixel] = ((float) image_bytes[pixel]) - 123.68;
+		}
+		// GREEN CHANNEL
+		if (pixel % 3 == 1){
+			image_floats[pixel] = ((float) image_bytes[pixel]) - 116.78;
+		}
+		// RED CHANNEL
+		if (pixel % 3 == 2){
+			image_floats[pixel] = ((float) image_bytes[pixel]) - 103.94;
+		}
+		
 	}
+
+
 
 	// write out images_float_cpu and correct_classes_cpu to new shard files
 	printf("Writing Image Floats & Labels to Shard Files...\n\n");
