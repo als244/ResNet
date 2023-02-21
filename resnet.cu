@@ -2983,7 +2983,7 @@ void update_parameters(Train_ResNet * trainer){
 	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
 	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
 	if (dump_id % 10 == 0){
-		printf("DUMPING TRAINER...!\n");
+		printf("DUMPING TRAINER...!\n\n");
 		dump_trainer(dump_id, trainer);
 	} 
 
