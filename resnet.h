@@ -60,6 +60,7 @@ typedef struct {
 	// kernel weights for output 1x1 step 
 	float * depth_expansion;
 	float * bias_depth_expansion;
+	BatchNorm * norm_expansion;
 	// need a projection is input dims != output dims
 	// contains pointers to convluations transforming input to output to add as residual
 	// occurs between stages:
@@ -73,7 +74,7 @@ typedef struct {
 	float * projection;
 	// will be equal to number of output filters
 	float * bias_projection;
-	BatchNorm * norm_residual_added;
+	
 } ConvBlock;
 
 
@@ -120,6 +121,8 @@ typedef struct {
 	float *post_spatial_activated;
 
 	float *post_expanded;
+	Cache_BatchNorm * norm_post_expanded;
+	float *post_expanded_norm_vals;
 
 	// if input dim of block != output dim of block, need to apply a transform 
 	// (otherwise null which implies identity of output of previous block)
@@ -127,8 +130,8 @@ typedef struct {
 	// occurs after adding last layer to residual connection
 	// adding transformed_residual (or equivalently input of block == output of prev block) to norm_post_expanded -> normalized
 	float *output;
-	Cache_BatchNorm * norm_post_residual_added;
-	// doing normalization, then ReLU
+	
+	// applying ReLU
 	float *output_activated;
 } Activation_ConvBlock;
 

@@ -476,7 +476,7 @@ __global__ void convolutionDerivBiases(const float * input, const float * weight
 // input is the output of convolution
 // ASSUME reLU activation function
 __global__ void doBatchNormAndActivate(const float * input, const float * gamma, const float * beta,
-								int spatial_dim, int filters, int batch_size, float eps, float * means, float * vars, float * normalized_temp, float * normalized, float * activated){
+								int spatial_dim, int filters, int batch_size, float eps, float * means, float * vars, float * normalized_temp, float * normalized, float * activated, bool to_activate){
 
 	int filter_id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (filter_id >= filters){
@@ -519,7 +519,12 @@ __global__ void doBatchNormAndActivate(const float * input, const float * gamma,
 				normalized_temp[inp_index] = normalized_temp_val;
 				normalized_val = gamma[filter_id] * normalized_temp_val + beta[filter_id];
 				normalized[inp_index] = normalized_val;
-				activated[inp_index] = fmaxf(normalized_val, 0); 
+				if (to_activate){
+					activated[inp_index] = fmaxf(normalized_val, 0); 
+				}
+				else{
+					activated[inp_index] = normalized_val;
+				}
 			}
 		}
 	}
@@ -533,7 +538,7 @@ __global__ void doBatchNormAndActivate(const float * input, const float * gamma,
 // ASSUME reLU activation function
 __global__ void activationAndBatchNormDeriv(const float * input, const float * gamma, const float * beta, 
 									int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars, const float * normalized_temp, const float * activated,
-									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * input_deriv){
+									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * input_deriv, bool to_activate_deriv){
 	
 	
 	int filter_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -557,7 +562,7 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 			for (int j = 0; j < spatial_dim; j++){
 				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
 				activated_val = activated[index];
-				if (activated_val <= 0){
+				if (to_activate_deriv && (activated_val <= 0)) {
 					normalized_temp_deriv[index] = 0;
 				}
 				else{
@@ -819,6 +824,27 @@ __global__ void filterAvgPoolDeriv(const float * pooled_deriv, int filters, int 
 
 
 
+__global__ void doActivation(int size, const float * input, float * output){
+	int i = blockDim.x * blockIdx.x + threadIdx.x;
+	if (i >= size){
+		return;
+	}
+	output[i] = fmaxf(0, input[i]);
+}
+
+__global__ void doActivationDeriv(int size, const float *input, const float * upstream_deriv, float * output){
+	int i = blockDim.x * blockIdx.x + threadIdx.x;
+	if (i >= size){
+		return;
+	}
+	if (input[i] > 0){
+		output[i] = upstream_deriv[i];
+	}
+	else{
+		output[i] = 0;
+	}
+}
+
 // assume pass in 1-D block with batch size blocks and 1 thread per block
 // could exploit more parallelism here but shouldnt be bottleneck for now...
 // assume X is a matrix where # rows = batch size and # columns = output dim
@@ -975,7 +1001,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	int bias_depth_reduction_size, bias_spatial_size, bias_depth_expansion_size;
 	float depth_reduction_fan_in, spatial_fan_in, depth_expansion_fan_in;
 
-	BatchNorm *norm_depth_reduction, *norm_spatial, *norm_residual_added;
+	BatchNorm *norm_depth_reduction, *norm_spatial, *norm_expansion;
 
 	depth_reduction_size = incoming_filters * reduced_depth;
 	depth_reduction_fan_in = incoming_spatial_dim * incoming_spatial_dim * incoming_filters;
@@ -1034,6 +1060,9 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	conv_block -> depth_expansion = depth_expansion;
 	conv_block -> bias_depth_expansion = bias_depth_expansion;
 
+	norm_expansion = init_batch_norm(incoming_spatial_dim, expanded_depth, is_zero);
+	conv_block -> norm_expansion = norm_expansion;
+
 	float * projection, *bias_projection;
 	int projection_size;
 	if (stride == 2){
@@ -1063,8 +1092,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	conv_block -> bias_projection = bias_projection;
 
 
-	norm_residual_added = init_batch_norm(incoming_spatial_dim, expanded_depth, is_zero);
-	conv_block -> norm_residual_added = norm_residual_added;
+	
 
 	return conv_block;
 }
@@ -1180,6 +1208,13 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 		locations[loc_ind] = conv_blocks[i] -> bias_depth_expansion;
 		sizes[loc_ind] = expanded_depth;
 		loc_ind++;
+
+		locations[loc_ind] = conv_blocks[i] -> norm_expansion -> gamma;
+		sizes[loc_ind] = expanded_depth;
+		loc_ind++;
+		locations[loc_ind] = conv_blocks[i] -> norm_expansion -> beta;
+		sizes[loc_ind] = expanded_depth;
+		loc_ind++;
 		
 		// if the block needed a projection to make input dim = output dim
 		if (conv_blocks[i] -> projection){
@@ -1195,14 +1230,6 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 			sizes[loc_ind] = expanded_depth;
 			loc_ind++;
 		}
-
-		locations[loc_ind] = conv_blocks[i] -> norm_residual_added -> gamma;
-		sizes[loc_ind] = expanded_depth;
-		loc_ind++;
-		locations[loc_ind] = conv_blocks[i] -> norm_residual_added -> beta;
-		sizes[loc_ind] = expanded_depth;
-		loc_ind++;
-
 
 		// after stride 2 block then reduce spatial dim for next block
 		if (is_block_spatial_reduction[i] == 1){
@@ -1280,10 +1307,10 @@ Activation_ConvBlock * init_activation_convblock(ConvBlock * conv_block, int bat
 	activation_conv_block -> expanded_depth = expanded_depth;
 	activation_conv_block -> stride = stride;
 
-	float * post_reduced, *post_spatial, *post_expanded, *transformed_residual, *output, *output_activated;
+	float * post_reduced, *post_spatial, *post_expanded, *post_expanded_norm_vals, *transformed_residual, *output, *output_activated;
 	float * post_reduced_activated, *post_spatial_activated;
 	int post_reduced_size, post_spatial_size, output_size;
-	Cache_BatchNorm * norm_post_reduced, *norm_post_spatial, *norm_post_residual_added;
+	Cache_BatchNorm * norm_post_reduced, *norm_post_spatial, *norm_post_expanded;
 	
 
 	post_reduced_size = reduced_depth * incoming_spatial_dim * incoming_spatial_dim * batch_size;
@@ -1311,6 +1338,12 @@ Activation_ConvBlock * init_activation_convblock(ConvBlock * conv_block, int bat
 	cudaMalloc(&post_expanded, output_size * sizeof(float));
 	activation_conv_block -> post_expanded = post_expanded;
 
+	norm_post_expanded = init_cache_batchnorm(output_size, expanded_depth);
+	activation_conv_block -> norm_post_expanded = norm_post_expanded;
+
+	cudaMalloc(&post_expanded_norm_vals, output_size * sizeof(float));
+	activation_conv_block -> post_expanded_norm_vals = post_expanded_norm_vals;
+
 	// only allocate space if transformed, otherwise it will be assumed to be identity of input
 	transformed_residual = NULL;
 	if (incoming_filters != expanded_depth){
@@ -1320,9 +1353,6 @@ Activation_ConvBlock * init_activation_convblock(ConvBlock * conv_block, int bat
 
 	cudaMalloc(&output, output_size * sizeof(float));
 	activation_conv_block -> output = output;
-
-	norm_post_residual_added = init_cache_batchnorm(output_size, expanded_depth);
-	activation_conv_block -> norm_post_residual_added = norm_post_residual_added;
 
 	cudaMalloc(&output_activated, output_size * sizeof(float));
 	activation_conv_block -> output_activated = output_activated;
@@ -1699,7 +1729,7 @@ void prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filter
 	
 }
 
-void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, int batch_size, float eps, float * input, float * activated_out){
+void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, int batch_size, float eps, float * input, float * activated_out, bool to_activate){
 	// reading values from batch norm params
 	int filters = batch_norm_params -> depth;
 	int spatial_dim = batch_norm_params -> spatial_dim;
@@ -1717,11 +1747,11 @@ void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_Batch
 	if (filters > num_threads){
 		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
 	}
-	doBatchNormAndActivate<<< num_blocks, num_threads >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, normalized_temp_out, normalized_out, activated_out);
+	doBatchNormAndActivate<<< num_blocks, num_threads >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, normalized_temp_out, normalized_out, activated_out, to_activate);
 }
 
 void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
-																								int batch_size, float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv){
+																								int batch_size, float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv, bool to_activate_deriv){
 	int filters = batch_norm_params -> depth;
 	int spatial_dim = batch_norm_params -> spatial_dim;
 	float * gamma = batch_norm_params -> gamma;
@@ -1739,7 +1769,7 @@ void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cach
 	if (filters > num_threads){
 		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
 	}
-	activationAndBatchNormDeriv <<< num_blocks, num_threads >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv);
+	activationAndBatchNormDeriv <<< num_blocks, num_threads >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv, to_activate_deriv);
 
 
 }
@@ -1820,7 +1850,7 @@ void forward_pass(Train_ResNet * trainer){
 	Cache_BatchNorm * norm_init_conv_cache = trainer -> forward_buffer -> activations -> norm_init_conv;
 	float * init_activated = trainer -> forward_buffer -> activations -> init_conv_activated;
 
-	prepareAndDoBatchNormAndActivate(norm_init_conv_params, norm_init_conv_cache, batch_size, eps, first_conv_output, init_activated);
+	prepareAndDoBatchNormAndActivate(norm_init_conv_params, norm_init_conv_cache, batch_size, eps, first_conv_output, init_activated, true);
 
 	printDeviceData("INIT CONV ACTIVATED", init_activated, print_size);
 
@@ -1847,7 +1877,7 @@ void forward_pass(Train_ResNet * trainer){
 	int in_spatial_dim, kern_dim, in_filters, out_filters, stride, out_spatial_dim, total_size_conv_block_output;
 
 	float * conv_block_input = init_convblock_input;
-	float *conv_input, * conv_weights, * conv_biases, * conv_output, *norm_input, * norm_output, * conv_block_output;
+	float *conv_input, * conv_weights, * conv_biases, * conv_output, *norm_input, * norm_output, * conv_block_output, * conv_block_output_activated;
 	float *projection_weights, *projection_biases, *transformed_residual;
 	BatchNorm * cur_batch_norm_params;
 	Cache_BatchNorm * cur_batch_norm_cache;
@@ -1877,7 +1907,7 @@ void forward_pass(Train_ResNet * trainer){
 		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_reduced;
 		norm_output = cur_conv_block_activation -> post_reduced_activated;
 
-		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output);
+		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, true);
 
 		printDeviceData("REDUCED CONV NORM & ACTIVATED", norm_output, print_size);
 
@@ -1906,7 +1936,7 @@ void forward_pass(Train_ResNet * trainer){
 		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_spatial;
 		norm_output = cur_conv_block_activation -> post_spatial_activated;
 
-		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output);
+		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, true);
 
 		printDeviceData("SPATIAL CONV NORM & ACTIVATED", norm_output, print_size);
 
@@ -1928,6 +1958,17 @@ void forward_pass(Train_ResNet * trainer){
 		prepareAndDoConvolution(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_biases, conv_output);
 
 		printDeviceData("EXPANDED CONV APPLIED", conv_output, print_size);
+
+		norm_input = conv_output;
+		cur_batch_norm_params = cur_conv_block_params -> norm_expansion;
+		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_expanded;
+		norm_output = cur_conv_block_activation -> post_expanded_norm_vals;
+
+		// do not activate because first need to a
+		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, false);
+
+
+		printDeviceData("EXPANDED NORM & ACTIVATED", norm_output, print_size);
 
 		// now need to add identity of conv_block_input (if same dimensions), or project=convolve (different dimensions) and add to conv_output
 		// projection is a incoming block filters X expanded depth matrix
@@ -1967,22 +2008,19 @@ void forward_pass(Train_ResNet * trainer){
 
 		printDeviceData("(TRANSFORMED) RESIDUAL", transformed_residual, print_size);
 
-		// add identity residual connection (or projected residual connection) to the prior convolutional output
-		addVec <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size_conv_block_output, conv_output, transformed_residual, conv_block_output);
+		// add identity residual connection (or projected residual connection) to the prior batch norm output
+		addVec <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size_conv_block_output, norm_output, transformed_residual, conv_block_output);
 
 		printDeviceData("CONV OUTPUT + (TRANSFORMED) RESIDUAL", conv_block_output, print_size);
 
-		norm_input = conv_block_output;
-		cur_batch_norm_params = cur_conv_block_params -> norm_residual_added;
-		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_residual_added;
-		norm_output = cur_conv_block_activation -> output_activated;
+		conv_block_output_activated = cur_conv_block_activation -> output_activated;
 
-		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output);
+		doActivation <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size_conv_block_output, conv_block_output, conv_block_output_activated);
 
-		printDeviceData("CONV BLOCK OUTPUT NORM & ACTIVATED", norm_output, print_size);
-
+		printDeviceData("CONV OUTPUT ACTIVATED", conv_block_output, print_size);
+		
 		// prepare for next block...
-		conv_block_input = norm_output;
+		conv_block_input = conv_block_output_activated;
 	}
 
 	int final_filters = dims -> final_depth;
@@ -2056,7 +2094,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 	// divide by the batch size because loss is sum across all batches...
 	// NOT SURE IF WE WANT TO DO AVERAGE HERE OR NOT...?
-	// averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
+	//averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
 
 	printDeviceData("CROSS ENTROPY DERIV", output_layer_deriv, print_size);
 
@@ -2109,15 +2147,16 @@ void backwards_pass(Train_ResNet * trainer){
 	// we are starting with deriv of last conv block output...
 
 	// To go backwards for each block we:
-		// 1.) Get deriv of batch norm for residual added to expanded conv output (with respect to both its own parameters and also the input to batch norm = expanded conv output)
+		// 1.) Get deriv of output activated (ReLU so just 0 or 1)
 		// 2.) Get deriv projection filter & transformed (if there is a projection of residual, otherwise both derivs are 1)
-		// 3.) Multiply the deriv of input to batch norm * deriv of transformed residual and add to the deriv of first layer of conv block (= batch norm output of prior block)
-		// 4.) Get deriv of expanded convolution & deriv of input to expanded convolution (= batch norm output of spatial conv)
-		// 5.) Get deriv of batch norm for spatial conv output (with respect to both its own parameters and also the input to batch norm = spatial conv output)
-		// 6.) Get deriv of sptial convolution & deriv of input to spatial convolution (= batch norm output of reduced conv)
-		// 7.) Get deriv of batch norm for reduced conv output (with respect to both its own parameters and also the input to batch norm = reduced conv output)
-		// 8.) Get deriv of reduced convolution & deriv of input to reduced convolution, which is the first layer of conv block (= batch norm output of prior conv block)
-		// Items 3.) and 8.) provide the derivative used to repeat process for prior block
+		// 3.) Multiply the deriv of output activation * deriv of transformed residual and add to the deriv of first layer of conv block (= output activated of prior block)
+		// 4.) Multiply the deriv of output activation * deriv of batch norm for expanded conv output (with respect to both its own parameters and also the input to batch norm = expanded conv output)
+		// 5.) Get deriv of expanded convolution & deriv of input to expanded convolution (= batch norm output of spatial conv)
+		// 6.) Get deriv of batch norm for spatial conv output (with respect to both its own parameters and also the input to batch norm = spatial conv output)
+		// 7.) Get deriv of sptial convolution & deriv of input to spatial convolution (= batch norm output of reduced conv)
+		// 8.) Get deriv of batch norm for reduced conv output (with respect to both its own parameters and also the input to batch norm = reduced conv output)
+		// 9.) Get deriv of reduced convolution & deriv of input to reduced convolution, which is the first layer of conv block (= batch norm output of prior conv block)
+		// Items 3.) and 9.) provide the derivative used to repeat process for prior block
 
 	
 
@@ -2138,10 +2177,10 @@ void backwards_pass(Train_ResNet * trainer){
 
 
 	// STARTING POINT FROM BACKPROP COMING FROM UPSTREAM LAYERS IS AT LAST CONV BLOCK ACTIVATION -> OUTPUT_ACTIVATED
-	float *conv_block_input, *conv_block_input_deriv;
+	float *conv_block_input, *conv_block_input_deriv, * upstream_deriv, *block_activation_deriv, *final_output_pre_activ;
 
 	// extra temp variables
-	int total_size;
+	int total_size, output_size;
 
 	for (int i = n_conv_blocks - 1; i >= 0; i--){
 
@@ -2163,29 +2202,19 @@ void backwards_pass(Train_ResNet * trainer){
 		cur_conv_block_activation = activation_conv_blocks[i];
 		cur_conv_block_activation_derivs = activation_conv_blocks_derivs[i];
 
-		/* 1: Conv Block Output Activation and Batch Norm Derivs */
-
-		// update the current batch norm layer pointers
-		cur_batch_norm_params = cur_conv_block_params -> norm_residual_added;
-		cur_batch_norm_param_derivs = cur_conv_block_param_derivs -> norm_residual_added;
-
-		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_residual_added;
-		cur_batch_norm_cache_derivs = cur_conv_block_activation_derivs -> norm_post_residual_added;
-
-		// fill in details about backprop I/O
-		// dL/dBN_Output (given)
-		bn_out_layer_deriv = activation_conv_blocks_derivs[i] -> output_activated;
-		// dL/dBN_Input (to fill in)
-		bn_input_deriv = cur_conv_block_activation_derivs -> output;
-		// input to batch norm layer from forward pass
-		bn_input = cur_conv_block_activation -> output;
-		// activated output of batch norm layer from forward pass
-		bn_activated = cur_conv_block_activation -> output_activated;
+		/* 1: Conv Block Output Activation */
 		
-		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+		// GIVEN
+		upstream_deriv = cur_conv_block_activation_derivs -> output_activated;
+		final_output_pre_activ = cur_conv_block_activation -> output;
 
-		printDeviceData("CONV BLOCK OUTPUT ACTIVATION & NORM DERIV", bn_input_deriv, print_size);
+		// to fill in the ReLU deriv location
+		block_activation_deriv = cur_conv_block_activation_derivs -> output;
+
+		output_size = batch_size * cur_conv_block_params -> expanded_depth * cur_conv_block_params -> incoming_spatial_dim * cur_conv_block_params -> incoming_spatial_dim / ((cur_conv_block_params -> stride) * (cur_conv_block_params -> stride));
+
+		doActivationDeriv <<< ceil((float) output_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (output_size, final_output_pre_activ, upstream_deriv, block_activation_deriv);
+
 
 		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv) */
 
@@ -2234,7 +2263,29 @@ void backwards_pass(Train_ResNet * trainer){
 		}
 		
 
-		/* 3: Expanded Convolution Derivs */
+		/* 3: Expanded Convolution And Batch Norm Derivs */
+
+		// update the current batch norm layer pointers
+		cur_batch_norm_params = cur_conv_block_params -> norm_expansion;
+		cur_batch_norm_param_derivs = cur_conv_block_param_derivs -> norm_expansion;
+
+		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_expanded;
+		cur_batch_norm_cache_derivs = cur_conv_block_activation_derivs -> norm_post_expanded;
+
+		// fill in details about backprop I/O
+		// dL/dBN_Output (given)
+		bn_out_layer_deriv = cur_conv_block_activation_derivs -> output;
+		// dL/dBN_Input (to fill in)
+		bn_input_deriv = cur_conv_block_activation_derivs -> post_expanded;
+		// input to batch norm layer from forward pass
+		bn_input = cur_conv_block_activation -> post_expanded;
+		// activated output of batch norm layer from forward pass
+		bn_activated = cur_conv_block_activation -> post_expanded_norm_vals;
+		
+		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, false);
+
+		printDeviceData("CONV BLOCK OUTPUT ACTIVATION & NORM DERIV", bn_input_deriv, print_size);
 
 		// CONVOLUTION DIMENSIONS
 		in_spatial_dim = (cur_conv_block_params -> incoming_spatial_dim) / (cur_conv_block_params -> stride);
@@ -2247,7 +2298,7 @@ void backwards_pass(Train_ResNet * trainer){
 		conv_input = cur_conv_block_activation -> post_spatial_activated;
 		conv_weight = cur_conv_block_params -> depth_expansion;
 		// from backprop
-		conv_out_deriv = cur_conv_block_activation_derivs -> output;
+		conv_out_deriv = cur_conv_block_activation_derivs -> post_expanded;
 
 		// CONVOLUTION BACKWARDS DERIV DATA BUFFERS
 		// because residual
@@ -2284,7 +2335,7 @@ void backwards_pass(Train_ResNet * trainer){
 		bn_activated = cur_conv_block_activation -> post_spatial_activated;
 		
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
 
 		printDeviceData("SPATIAL ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
@@ -2338,7 +2389,7 @@ void backwards_pass(Train_ResNet * trainer){
 		bn_activated = cur_conv_block_activation -> post_reduced_activated;
 		
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
 
 		printDeviceData("REDUCED ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
@@ -2426,7 +2477,7 @@ void backwards_pass(Train_ResNet * trainer){
 	bn_activated = activations -> init_conv_activated;
 		
 	prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv);
+																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
 
 	printDeviceData("INIT CONV ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
@@ -2680,6 +2731,11 @@ void dump_conv_block_activation(int dump_id, Train_ResNet * trainer, Activation_
 	free(filepath_dup);
 	free(cpu_expanded_applied);
 
+	/* POST EXPANDED NORM */
+	print_ret = asprintf(&batchnorm_filepath_dup, "%sexpanded/", batchnorm_filepath);
+	dump_batch_norm_cache(trainer, batchnorm_filepath_dup, activation_conv_block -> norm_post_expanded);
+	free(batchnorm_filepath_dup);
+
 
 	/* (TRANSFORMED) RESIDUAL */
 
@@ -2705,12 +2761,7 @@ void dump_conv_block_activation(int dump_id, Train_ResNet * trainer, Activation_
 	free(filepath_dup);
 	free(cpu_combined_output);
 
-	/* POST RESIDUAL NORM */
-	print_ret = asprintf(&batchnorm_filepath_dup, "%soutput/", batchnorm_filepath);
-	dump_batch_norm_cache(trainer, batchnorm_filepath_dup, activation_conv_block -> norm_post_residual_added);
-	free(batchnorm_filepath_dup);
-
-
+	
 	/* POST RESIDUAL ACTIVATED */
 	float * cpu_combined_output_activated = (float *) malloc(expanded_size * sizeof(float));
 	cudaMemcpy(cpu_combined_output_activated, activation_conv_block -> output_activated, expanded_size * sizeof(float), cudaMemcpyDeviceToHost);
