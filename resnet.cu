@@ -3386,7 +3386,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.1;
+	float LEARNING_RATE = 0.00001;
 	float WEIGHT_DECAY = 0.0001;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
