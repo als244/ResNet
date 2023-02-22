@@ -925,10 +925,9 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	if (i >= size){
 		return;
 	}
-	float bias_corrected_mean = means[i] / (1 - cur_mean_decay);
-	float bias_corrected_var = vars[i] / (1 - cur_var_decay);
+	float b = sqrtf(1 - cur_var_decay) / (1 - cur_mean_decay);
 	float old_model_param = model_params[i];
-	model_params[i] = model_params[i] - learning_rate * (bias_corrected_mean / (sqrtf(bias_corrected_var) + eps));
+	model_params[i] = model_params[i] - learning_rate * (means[i] / (sqrtf(vars[i]) + eps)) * b;
 	if (isnan(model_params[i])){
 		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value\n", loc_ind, i);
 		model_params[i] = old_model_param;
@@ -961,7 +960,7 @@ Dims * init_dimensions(int input, int init_kernel_dim, int init_conv_filters, in
 	return dims;
 }
 
-BatchNorm * init_batch_norm(int spatial_dim, int depth, bool is_zero){
+BatchNorm * init_batch_norm(int spatial_dim, int depth, float gamma_val, bool is_zero){
 	
 	BatchNorm * batch_norm = (BatchNorm *) malloc(sizeof(BatchNorm));
 
@@ -972,8 +971,9 @@ BatchNorm * init_batch_norm(int spatial_dim, int depth, bool is_zero){
 
 	cudaMalloc(&gamma, depth * sizeof(float));
 	cudaMemset(gamma, 0, depth * sizeof(float));
+	// ZERO-GAMMA INITIALIZE TO SOLVE PROBLEM OF EXPLODING GRADIENTS (Goyal et al. 2017)
 	if (!is_zero){
-		setVal <<< ceil((float) depth / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (depth, 1.0, gamma);
+		setVal <<< ceil((float) depth / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (depth, gamma_val, gamma);
 	}
 
 	cudaMalloc(&beta, depth * sizeof(float));
@@ -1015,7 +1015,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	cudaMalloc(&bias_depth_reduction, bias_depth_reduction_size * sizeof(float));
 	cudaMemset(bias_depth_reduction, 0, bias_depth_reduction_size * sizeof(float));
 
-	norm_depth_reduction = init_batch_norm(incoming_spatial_dim, reduced_depth, is_zero);
+	norm_depth_reduction = init_batch_norm(incoming_spatial_dim, reduced_depth, 1.0, is_zero);
 
 
 	spatial_size = reduced_depth * reduced_depth * 3 * 3;
@@ -1034,7 +1034,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	if (stride == 2){
 		incoming_spatial_dim /= 2;
 	}
-	norm_spatial = init_batch_norm(incoming_spatial_dim, reduced_depth, is_zero);
+	norm_spatial = init_batch_norm(incoming_spatial_dim, reduced_depth, 1.0, is_zero);
 
 	depth_expansion_size = expanded_depth * reduced_depth;
 	depth_expansion_fan_in = incoming_spatial_dim * incoming_spatial_dim * reduced_depth;
@@ -1060,7 +1060,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	conv_block -> depth_expansion = depth_expansion;
 	conv_block -> bias_depth_expansion = bias_depth_expansion;
 
-	norm_expansion = init_batch_norm(incoming_spatial_dim, expanded_depth, is_zero);
+	norm_expansion = init_batch_norm(incoming_spatial_dim, expanded_depth, 0.0, is_zero);
 	conv_block -> norm_expansion = norm_expansion;
 
 	float * projection, *bias_projection;
@@ -1082,7 +1082,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 		}
 		cudaMalloc(&bias_projection, expanded_depth * sizeof(float));
 		cudaMemset(bias_projection, 0, expanded_depth * sizeof(float));
-		norm_projection = init_batch_norm(incoming_spatial_dim, expanded_depth, is_zero);
+		norm_projection = init_batch_norm(incoming_spatial_dim, expanded_depth, 1.0, is_zero);
 	}
 	else{
 		projection = NULL;
@@ -1146,7 +1146,7 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 	sizes[loc_ind] = init_conv_filters;
 	loc_ind++;
 
-	BatchNorm * norm_init_conv = init_batch_norm(input_dim / model_dims -> init_conv_stride, init_conv_filters, is_zero);
+	BatchNorm * norm_init_conv = init_batch_norm(input_dim / model_dims -> init_conv_stride, init_conv_filters, 1.0, is_zero);
 	params -> norm_init_conv = norm_init_conv;
 
 	locations[loc_ind] = norm_init_conv -> gamma;
@@ -1253,7 +1253,7 @@ Params * init_model_parameters(Dims * model_dims, curandGenerator_t * gen, bool 
 	cudaMalloc(&fully_connected, fully_connected_size * sizeof(float));
 	cudaMemset(fully_connected, 0, fully_connected_size * sizeof(float));
 	if (!is_zero){
-		init_weights_gaussian_device(gen, fully_connected_size, fully_connected, 0, 2.0 / fully_connected_fan_in);
+		init_weights_gaussian_device(gen, fully_connected_size, fully_connected, 0, 0.0001);
 	}
 
 	params -> fully_connected = fully_connected;
@@ -2108,7 +2108,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 	// divide by the batch size because loss is sum across all batches...
 	// NOT SURE IF WE WANT TO DO AVERAGE HERE OR NOT...?
-	averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
+	//averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
 
 	printDeviceData("CROSS ENTROPY DERIV", output_layer_deriv, print_size);
 
@@ -2295,6 +2295,7 @@ void backwards_pass(Train_ResNet * trainer){
 		}
 		else{
 			total_size = batch_size * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_filters);
+			setVal <<< ceil((float) total_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size, 0, conv_block_input_deriv);
 			addVec <<< ceil((float) total_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size, conv_block_input_deriv, cur_conv_block_activation_derivs -> output, conv_block_input_deriv);
 		}
 		
@@ -3013,7 +3014,6 @@ void check_errors(Train_ResNet * trainer, int param_size, float * model_location
 	free(cpu_param_var);
 }
 
-
 // doing ADAM optimizer
 void update_parameters(Train_ResNet * trainer){
 	
@@ -3065,21 +3065,23 @@ void update_parameters(Train_ResNet * trainer){
 	/* DUMP THE STATE OF TRAINING PROCESS! */
 	// dumping every 10 batches
 	// also dump when nan or inf occurs (data dumped to id=99999999)
-	int shard_n_images = trainer -> cur_batch -> shard_n_images;
-	int cur_shard_id = trainer -> cur_batch -> cur_shard_id;
-	// subtract 1 because incremented after loading...
-	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
-	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
-	if (dump_id % 10 == 0){
-		printf("DUMPING TRAINER...!\n\n");
-		dump_trainer(dump_id, trainer);
-	} 
+	// int shard_n_images = trainer -> cur_batch -> shard_n_images;
+	// int cur_shard_id = trainer -> cur_batch -> cur_shard_id;
+	// // subtract 1 because incremented after loading...
+	// int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
+	// int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
+	// if (dump_id % 10 == 0){
+	// 	printf("DUMPING TRAINER...!\n\n");
+	// 	dump_trainer(dump_id, trainer);
+	// } 
 
-	/* RESET THE GRADIENTS TO 0 FOR NEXT PASS THROUGH BACKPROP */
+	/* RESET ALL VALUES TO 0 FOR NEXT PASS THROUGH BACKPROP */
 	for (int i = 0; i < n_locations; i++){
 		param_size = param_sizes[i];
 		grad_location = current_gradient_locations[i];
 		cudaMemset(grad_location, 0, param_size * sizeof(float));
+		// reset_forward_buffer(trainer);
+		// reset_backward_buffer(trainer);
 	}
 
 	// reset images and classes before next cudaMemcpy
@@ -3389,7 +3391,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.00001;
+	float LEARNING_RATE = 0.0001;
 	float WEIGHT_DECAY = 0.1;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
