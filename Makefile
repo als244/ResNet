@@ -7,7 +7,7 @@ ResNet: resnet.cu
 	nvcc -g -G resnet.cu -lcurand -o ResNet
 
 ResNetOpt: resnet.cu
-	nvcc -O2 resnet.cu -lcurand -o ResNetOpt
+	nvcc -O3 resnet.cu -lcurand -o ResNetOpt
 
 BuildShards: build_training_shards.c
 	${CC} ${CFLAGS} -o $@ $^
