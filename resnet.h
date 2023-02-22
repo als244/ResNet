@@ -74,6 +74,7 @@ typedef struct {
 	float * projection;
 	// will be equal to number of output filters
 	float * bias_projection;
+	BatchNorm * norm_projection;
 	
 } ConvBlock;
 
@@ -127,6 +128,8 @@ typedef struct {
 	// if input dim of block != output dim of block, need to apply a transform 
 	// (otherwise null which implies identity of output of previous block)
 	float *transformed_residual;
+	Cache_BatchNorm * norm_post_projection;
+	float * post_projection_norm_vals;
 	// occurs after adding last layer to residual connection
 	// adding transformed_residual (or equivalently input of block == output of prev block) to norm_post_expanded -> normalized
 	float *output;
