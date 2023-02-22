@@ -928,7 +928,7 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	float bias_corrected_mean = means[i] / (1 - cur_mean_decay);
 	float bias_corrected_var = vars[i] / (1 - cur_var_decay);
 	float old_model_param = model_params[i];
-	model_params[i] = model_params[i] - learning_rate * (bias_corrected_mean / (sqrtf(bias_corrected_var) + eps) + model_params[i] * weight_decay);
+	model_params[i] = model_params[i] - learning_rate * (bias_corrected_mean / (sqrtf(bias_corrected_var) + eps));
 	if (isnan(model_params[i])){
 		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value\n", loc_ind, i);
 		model_params[i] = old_model_param;
@@ -3026,7 +3026,7 @@ void update_parameters(Train_ResNet * trainer){
 	float base_var_decay = trainer -> base_var_decay;
 	// update the running decays here...
 	float cur_mean_decay = trainer -> cur_mean_decay * base_mean_decay;
-	float cur_var_decay = trainer -> cur_var_decay * base_mean_decay;
+	float cur_var_decay = trainer -> cur_var_decay * base_var_decay;
 	float eps = trainer -> eps;
 
 	Params * model_params = trainer -> model -> params;
@@ -3083,9 +3083,12 @@ void update_parameters(Train_ResNet * trainer){
 	}
 
 	// reset images and classes before next cudaMemcpy
-
 	cudaMemset(trainer -> cur_batch -> images, 0, batch_size * image_size * sizeof(float));
 	cudaMemset(trainer -> cur_batch -> correct_classes, 0, batch_size * sizeof(int));
+
+	// change the current mean and var decay...
+	trainer -> cur_mean_decay = cur_mean_decay;
+	trainer -> cur_var_decay = cur_var_decay;
 }
 
 
@@ -3387,7 +3390,7 @@ int main(int argc, char *argv[]) {
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
 	float LEARNING_RATE = 0.00001;
-	float WEIGHT_DECAY = 0.0001;
+	float WEIGHT_DECAY = 0.1;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
 	float EPS = 0.0000001;
