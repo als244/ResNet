@@ -204,6 +204,7 @@ typedef struct {
 	Forward_Buffer * forward_buffer;
 	Backprop_Buffer * backprop_buffer;
 	float learning_rate;
+	float weight_decay;
 	float base_mean_decay;
 	float base_var_decay;
 	float cur_mean_decay;

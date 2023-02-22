@@ -920,7 +920,7 @@ __global__ void updateVars(int size, const float * gradients, float base_var_dec
 }
 
 // assume large 1-D launch
-__global__ void updateParams(int size, float * model_params, const float * means, const float * vars, float learning_rate, float cur_mean_decay, float cur_var_decay, float eps, int loc_ind){
+__global__ void updateParams(int size, float * model_params, const float * means, const float * vars, float learning_rate, float weight_decay, float cur_mean_decay, float cur_var_decay, float eps, int loc_ind){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
 		return;
@@ -928,7 +928,7 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	float bias_corrected_mean = means[i] / (1 - cur_mean_decay);
 	float bias_corrected_var = vars[i] / (1 - cur_var_decay);
 	float old_model_param = model_params[i];
-	model_params[i] = model_params[i] - learning_rate * bias_corrected_mean / (sqrtf(bias_corrected_var) + eps);
+	model_params[i] = model_params[i] - learning_rate * (bias_corrected_mean / (sqrtf(bias_corrected_var) + eps) + model_params[i] * weight_decay);
 	if (isnan(model_params[i])){
 		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value\n", loc_ind, i);
 		model_params[i] = old_model_param;
@@ -1472,7 +1472,7 @@ Backprop_Buffer * init_backprop_buffer(Dims * dims, ConvBlock ** conv_blocks, in
 }
 
 
-Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, float learning_rate, float mean_decay, float var_decay, float eps, int n_epochs){
+Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, float learning_rate, float weight_decay, float mean_decay, float var_decay, float eps, int n_epochs){
 	Train_ResNet * trainer = (Train_ResNet *) malloc(sizeof(Train_ResNet));
 
 	trainer -> model = model;
@@ -1486,6 +1486,7 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 	trainer -> backprop_buffer = init_backprop_buffer(dims, conv_blocks, batch_size);
 
 	trainer -> learning_rate = learning_rate;
+	trainer -> weight_decay = weight_decay;
 	trainer -> base_mean_decay = mean_decay;
 	trainer -> base_var_decay = var_decay;
 	trainer -> cur_mean_decay = 1;
@@ -2107,7 +2108,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 	// divide by the batch size because loss is sum across all batches...
 	// NOT SURE IF WE WANT TO DO AVERAGE HERE OR NOT...?
-	//averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
+	averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
 
 	printDeviceData("CROSS ENTROPY DERIV", output_layer_deriv, print_size);
 
@@ -3020,6 +3021,7 @@ void update_parameters(Train_ResNet * trainer){
 	size_t image_size = (size_t) trainer -> cur_batch -> image_size;
 
 	float learning_rate = trainer -> learning_rate;
+	float weight_decay = trainer -> weight_decay;
 	float base_mean_decay = trainer -> base_mean_decay;
 	float base_var_decay = trainer -> base_var_decay;
 	// update the running decays here...
@@ -3056,7 +3058,7 @@ void update_parameters(Train_ResNet * trainer){
 
 		updateMeans <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_mean_decay, mean_location, i);
 		updateVars <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_var_decay, var_location, i);
-		updateParams <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, model_location, mean_location, var_location, learning_rate, cur_mean_decay, cur_var_decay, eps, i);
+		updateParams <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, model_location, mean_location, var_location, learning_rate, weight_decay, cur_mean_decay, cur_var_decay, eps, i);
 	}
 
 
@@ -3085,6 +3087,7 @@ void update_parameters(Train_ResNet * trainer){
 	cudaMemset(trainer -> cur_batch -> images, 0, batch_size * image_size * sizeof(float));
 	cudaMemset(trainer -> cur_batch -> correct_classes, 0, batch_size * sizeof(int));
 }
+
 
 void testTranspose(){
 
@@ -3383,13 +3386,14 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.000000001;
+	float LEARNING_RATE = 0.1;
+	float WEIGHT_DECAY = 0.0001;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
 	float EPS = 0.0000001;
 	float N_EPOCHS = 1;
 
-	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS);
+	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS);
 	
 
 	/* PERFORM TRAINING */
