@@ -3483,6 +3483,7 @@ int main(int argc, char *argv[]) {
 				printf("\nEpoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.2f%%\n\n", epoch, iter, avg_batch_loss, batch_accuracy);
 			}
 			fprintf(loss_file, "%.4f\n", avg_batch_loss);
+			fflush(loss_file);
 
 
 			/* DO BACKPROP */
@@ -3508,5 +3509,6 @@ int main(int argc, char *argv[]) {
 		(trainer -> accuracy_per_epoch)[epoch] = epoch_accuracy;
 
 	}
+	fclose(loss_file);
 
 }
