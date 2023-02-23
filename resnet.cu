@@ -2786,6 +2786,11 @@ void dump_conv_block_activation(int dump_id, Train_ResNet * trainer, Activation_
 		fclose(fp);
 		free(filepath_dup);
 		free(cpu_residual);
+
+		print_ret = asprintf(&batchnorm_filepath_dup, "%sprojected/", batchnorm_filepath);
+		dump_batch_norm_cache(trainer, batchnorm_filepath_dup, activation_conv_block -> norm_post_projection);
+		free(batchnorm_filepath_dup);
+
 	}
 
 	/* EXPANDED + RESIDUAL */
@@ -3065,15 +3070,15 @@ void update_parameters(Train_ResNet * trainer){
 	/* DUMP THE STATE OF TRAINING PROCESS! */
 	// dumping every 10 batches
 	// also dump when nan or inf occurs (data dumped to id=99999999)
-	// int shard_n_images = trainer -> cur_batch -> shard_n_images;
-	// int cur_shard_id = trainer -> cur_batch -> cur_shard_id;
-	// // subtract 1 because incremented after loading...
-	// int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
-	// int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
-	// if (dump_id % 10 == 0){
-	// 	printf("DUMPING TRAINER...!\n\n");
-	// 	dump_trainer(dump_id, trainer);
-	// } 
+	int shard_n_images = trainer -> cur_batch -> shard_n_images;
+	int cur_shard_id = trainer -> cur_batch -> cur_shard_id;
+	// subtract 1 because incremented after loading...
+	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
+	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
+	if (dump_id % 1000 == 0){
+		printf("DUMPING TRAINER...!\n\n");
+		dump_trainer(dump_id, trainer);
+	} 
 
 	/* RESET ALL VALUES TO 0 FOR NEXT PASS THROUGH BACKPROP */
 	for (int i = 0; i < n_locations; i++){
@@ -3391,7 +3396,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.0001;
+	float LEARNING_RATE = 0.001;
 	float WEIGHT_DECAY = 0.1;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
@@ -3415,6 +3420,9 @@ int main(int argc, char *argv[]) {
 	int PRINT_FREQ = 1;
 
 	cudaError_t status;
+
+	char * LOSS_FILENAME = (char *) "/mnt/storage/data/vision/imagenet/training_dumps/avg_loss_log.txt";
+	FILE * loss_file = fopen(LOSS_FILENAME, "w");
 
 	for (int epoch = 0; epoch < N_EPOCHS; epoch++){
 		epoch_loss = 0;
@@ -3474,6 +3482,8 @@ int main(int argc, char *argv[]) {
 			if (iter % PRINT_FREQ == 0){
 				printf("\nEpoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.2f%%\n\n", epoch, iter, avg_batch_loss, batch_accuracy);
 			}
+			fprintf(loss_file, "%.4f\n", avg_batch_loss);
+
 
 			/* DO BACKPROP */
 			printf("Backprop to Compute Derivs...\n");
