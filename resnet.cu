@@ -636,8 +636,8 @@ __global__ void doMaxPool(const float * input, int kern_dim, int stride, int bat
 	float max_val, inp_val;
 	int spatial_row, spatial_col, max_ind, inp_ind, out_ind;
 	for (int s = 0; s < batch_size; s++){
-		max_val = -1;
-		max_ind = -1;
+		max_val = -1024;
+		max_ind = -1024;
 		for (int row_off = -half_kernel_dim; row_off <= half_kernel_dim; row_off++){
 			for (int col_off = -half_kernel_dim; col_off <= half_kernel_dim; col_off++){
 				spatial_row = spatial_row_start + row_off;
@@ -692,7 +692,7 @@ __global__ void doFilterAvgPool(const float * input, int spatial_dim, float * ou
 	int sample_ind = threadIdx.x;
 
 	// know this because of launch specification
-	int filters = blockDim.x;
+	int filters = gridDim.x;
 
 	float sum = 0;
 	for (int row = 0; row < spatial_dim; row++){
@@ -1596,13 +1596,16 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 
 	
 	/* SAVING BATCH TO FILES FOR INSPECTION... */
-	// FILE * test_images_file = fopen("images.buffer", "wb");
-	// fwrite(images_float_cpu, sizeof(float), total_pixels, test_images_file);
-	// fclose(test_images_file);
+	// if (cur_batch_in_shard == 0){
+	// 	FILE * test_images_file = fopen("images.buffer", "wb");
+	// 	fwrite(images_float_cpu, sizeof(float), total_pixels, test_images_file);
+	// 	fclose(test_images_file);
 
-	// FILE * test_labels_file = fopen("labels.buffer", "wb");
-	// fwrite(correct_classes_cpu, sizeof(int), (size_t) batch_size, test_labels_file);
-	// fclose(test_labels_file);
+	// 	FILE * test_labels_file = fopen("labels.buffer", "wb");
+	// 	fwrite(correct_classes_cpu, sizeof(int), (size_t) batch_size, test_labels_file);
+	// 	fclose(test_labels_file);
+	// 	exit(0);
+	// }
 
 	// copy current batch to GPU
 
@@ -3075,7 +3078,7 @@ void update_parameters(Train_ResNet * trainer){
 	// subtract 1 because incremented after loading...
 	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
 	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
-	if (dump_id % 1000 == 0){
+	if (dump_id % 100 == 0){
 		printf("DUMPING TRAINER...!\n\n");
 		dump_trainer(dump_id, trainer);
 	} 
@@ -3396,7 +3399,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.0001;
+	float LEARNING_RATE = 0.00001;
 	float WEIGHT_DECAY = 0.1;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
@@ -3509,6 +3512,11 @@ int main(int argc, char *argv[]) {
 		(trainer -> accuracy_per_epoch)[epoch] = epoch_accuracy;
 
 	}
+
+	// DO A FINAL DUMP AFTER MODEL FINISHES (stored at 77777777)
+	int FINAL_DUMP_ID = 77777777;
+	dump_trainer(FINAL_DUMP_ID, trainer);
+
 	fclose(loss_file);
 
 }
