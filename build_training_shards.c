@@ -62,8 +62,6 @@ void build_shard(int shard_id, long image_dim_in, long image_dim_out, long chann
     	img_cnt++;
     }
 
-    printf("Image Count: %lu\n", img_cnt);
-
     fclose(fp);
 
     size_t true_total_pixels = img_cnt * image_size_out;
