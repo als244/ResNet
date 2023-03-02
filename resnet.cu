@@ -2859,6 +2859,17 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	FILE * fp;
 	int n_wrote, print_ret;
 
+	// input
+	size_t input_size = trainer -> cur_batch -> image_size * batch_size;
+	if (!is_deriv){
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/input.buffer", dump_id);
+		fp = fopen(filepath, "wb");
+		n_wrote = fwrite(trainer -> cur_batch -> images_float_cpu, sizeof(float), input_size, fp);
+		fclose(fp);
+		free(filepath);
+	}
+
+
 	/* 1. INIT CONV */
 
 	size_t init_conv_applied_size = batch_size * dims -> init_conv_filters * (dims -> input / dims -> init_conv_stride) * (dims -> input / dims -> init_conv_stride);
@@ -3434,7 +3445,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.00001;
+	float LEARNING_RATE = 0.000001;
 	float WEIGHT_DECAY = 0.1;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
