@@ -849,14 +849,14 @@ __global__ void doActivationDeriv(int size, const float *input, const float * up
 // could exploit more parallelism here but shouldnt be bottleneck for now...
 // assume X is a matrix where # rows = batch size and # columns = output dim
 __global__ void softMax(const float * X, int batch_size, int output_len, float * out){
-  int i = blockIdx.x;
+  int i = threadIdx.x;
   if (i < batch_size){
     float sum = 0;
     for (int j = 0; j < output_len; j++){
-      sum += __expf(X[i * output_len + j]);
+      sum += expf(X[i * output_len + j]);
     }
     for (int j = 0; j < output_len; j++){
-      out[i * output_len + j] = __expf(X[i * output_len + j]) / sum;
+      out[i * output_len + j] = expf(X[i * output_len + j]) / sum;
     }
   }
 }
@@ -877,7 +877,7 @@ __global__ void averageDerivOverBatchSize(float * output_deriv, int output_dim, 
 
 // launch with gridDim = (batch_size), blockDim = (1)
 __global__ void crossEntropyDeriv(float * output_deriv, const int * correct_classes, int output_dim, int batch_size){
-	int i = blockIdx.x;
+	int i = threadIdx.x;
 	if (i < batch_size){
 		output_deriv[i * output_dim + correct_classes[i]] -= 1;
 	}
@@ -1763,7 +1763,10 @@ void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_Batch
 	if (filters > num_threads){
 		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
 	}
-	doBatchNormAndActivate<<< num_blocks, num_threads >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, normalized_temp_out, normalized_out, activated_out, to_activate);
+
+	dim3 gridDimBatchNorm(num_blocks);
+	dim3 blockDimBatchNorm(num_threads);
+	doBatchNormAndActivate<<< gridDimBatchNorm, blockDimBatchNorm >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, normalized_temp_out, normalized_out, activated_out, to_activate);
 }
 
 void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
@@ -1785,7 +1788,10 @@ void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cach
 	if (filters > num_threads){
 		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
 	}
-	activationAndBatchNormDeriv <<< num_blocks, num_threads >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv, to_activate_deriv);
+
+	dim3 gridDimBatchNormDeriv(num_blocks);
+	dim3 blockDimBatchNormDeriv(num_threads);
+	activationAndBatchNormDeriv <<< gridDimBatchNormDeriv, blockDimBatchNormDeriv >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv, to_activate_deriv);
 
 
 }
@@ -1877,7 +1883,8 @@ void forward_pass(Train_ResNet * trainer){
 	int * max_ind_buff = trainer -> forward_buffer -> activations -> max_inds;
 
 	dim3 gridDimMaxPool(init_maxpool_out_dim, init_maxpool_out_dim);
-	doMaxPool <<< gridDimMaxPool , init_out_filters >>> (init_activated, init_maxpool_dim, init_maxpool_stride, batch_size, max_ind_buff, init_convblock_input);
+	dim3 blockDimMaxPool(init_out_filters);
+	doMaxPool <<< gridDimMaxPool , blockDimMaxPool >>> (init_activated, init_maxpool_dim, init_maxpool_stride, batch_size, max_ind_buff, init_convblock_input);
 
 	printDeviceData("MAX POOL OUTPUT", init_convblock_input, print_size);
 
@@ -2024,15 +2031,18 @@ void forward_pass(Train_ResNet * trainer){
 
 		printDeviceData("(TRANSFORMED) RESIDUAL", transformed_residual, print_size);
 
+		dim3 gridDimConvOutput(ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK));
+		dim3 blockDimConvOutput(MAX_THREAD_PER_BLOCK);
+
 		conv_block_output = cur_conv_block_activation -> output;
 		// add identity residual connection (or projected residual connection) to the prior batch norm output
-		addVec <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size_conv_block_output, norm_output, post_projection_norm_vals, conv_block_output);
+		addVec <<< gridDimConvOutput, blockDimConvOutput >>> (total_size_conv_block_output, norm_output, post_projection_norm_vals, conv_block_output);
 
 		printDeviceData("CONV OUTPUT + (TRANSFORMED) RESIDUAL", conv_block_output, print_size);
 
 		conv_block_output_activated = cur_conv_block_activation -> output_activated;
 
-		doActivation <<< ceil((float) total_size_conv_block_output / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size_conv_block_output, conv_block_output, conv_block_output_activated);
+		doActivation <<< gridDimConvOutput, blockDimConvOutput >>> (total_size_conv_block_output, conv_block_output, conv_block_output_activated);
 
 		printDeviceData("CONV OUTPUT ACTIVATED", conv_block_output, print_size);
 		
@@ -2048,7 +2058,9 @@ void forward_pass(Train_ResNet * trainer){
 	// NEED TO DO AVERAGE POOL OF LAST LAYER to go from (batch_size, 7, 7, 2048) to (batch size, 1, 1, 2048)
 
 	// format of output is each row is a sample and has a row size of 2048
-	doFilterAvgPool <<< (final_filters), (batch_size) >>> (final_conv_block_output, final_spatial_dim, final_avg_pool_values);
+	dim3 gridDimAvgPool(final_filters);
+	dim3 blockDimAvgPool(batch_size);
+	doFilterAvgPool <<< gridDimAvgPool, blockDimAvgPool >>> (final_conv_block_output, final_spatial_dim, final_avg_pool_values);
 
 	printDeviceData("FINAL AVG POOL VALUES", final_avg_pool_values, print_size);
 
@@ -2073,7 +2085,9 @@ void forward_pass(Train_ResNet * trainer){
 
 	// DO SOFTMAX
 	float * pred = trainer -> forward_buffer -> pred;
-	softMax <<< (batch_size), (1) >>> (fc_output, batch_size, output_dim, pred);
+	dim3 gridDimSoftMax(1);
+	dim3 blockDimSoftMax(batch_size);
+	softMax <<< gridDimSoftMax, blockDimSoftMax >>> (fc_output, batch_size, output_dim, pred);
 
 	printDeviceData("SOFTMAX PREDICTIONS", pred, print_size);
 
@@ -2107,11 +2121,16 @@ void backwards_pass(Train_ResNet * trainer){
 	float * output_layer_deriv = backprop_buffer -> output_layer_deriv;
 	cudaMemcpy(output_layer_deriv, pred, batch_size * output_dim * sizeof(float), cudaMemcpyDeviceToDevice);
 
-	crossEntropyDeriv <<< (batch_size), (1) >>> (output_layer_deriv, correct_classes, output_dim, batch_size);
+	dim3 gridDimCrossDeriv(1);
+	dim3 blockDimCrossDeriv(batch_size);
+	crossEntropyDeriv <<< gridDimCrossDeriv, blockDimCrossDeriv >>> (output_layer_deriv, correct_classes, output_dim, batch_size);
 
 	// divide by the batch size because loss is sum across all batches...
 	// NOT SURE IF WE WANT TO DO AVERAGE HERE OR NOT...?
-	//averageDerivOverBatchSize <<< output_dim, batch_size >>> (output_layer_deriv, output_dim, batch_size);
+	
+	// dim3 gridDimTakeAvgDeriv(output_dim);
+	// dim3 blockDimTakeAvgDeriv(batch_size);
+	// averageDerivOverBatchSize <<< gridDimTakeAvgDeriv, blockDimTakeAvgDeriv >>> (output_layer_deriv, output_dim, batch_size);
 
 	printDeviceData("CROSS ENTROPY DERIV", output_layer_deriv, print_size);
 
@@ -2153,7 +2172,9 @@ void backwards_pass(Train_ResNet * trainer){
 	float * final_conv_block_output_deriv = activation_conv_blocks_derivs[n_conv_blocks - 1] -> output_activated;
 	// using final_avg_pool_deriv (batch_size, 2048) to populate final_conv_block_output_deriv (batch_size, 7, 7, 2048)
 	// each expanded (prior to pooling) spatial index takes on value of given filter's avg_pool_deriv / (spatial_dim^2)
-	filterAvgPoolDeriv <<< (final_depth), (batch_size) >>> (final_avg_pool_deriv, final_depth, batch_size, final_spatial_dim, final_conv_block_output_deriv);
+	dim3 gridDimAvgPoolDeriv(final_depth);
+	dim3 blockDimAvgPoolDeriv(batch_size);
+	filterAvgPoolDeriv <<< gridDimAvgPoolDeriv, blockDimAvgPoolDeriv >>> (final_avg_pool_deriv, final_depth, batch_size, final_spatial_dim, final_conv_block_output_deriv);
 
 	printDeviceData("FINAL CONV BLOCK OUTPUT ACTIVATION DERIV", final_conv_block_output_deriv, print_size);
 
@@ -2230,7 +2251,9 @@ void backwards_pass(Train_ResNet * trainer){
 
 		output_size = batch_size * cur_conv_block_params -> expanded_depth * cur_conv_block_params -> incoming_spatial_dim * cur_conv_block_params -> incoming_spatial_dim / ((cur_conv_block_params -> stride) * (cur_conv_block_params -> stride));
 
-		doActivationDeriv <<< ceil((float) output_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (output_size, final_output_pre_activ, upstream_deriv, block_activation_deriv);
+		dim3 gridDimOutput(ceil((float) output_size / MAX_THREAD_PER_BLOCK));
+		dim3 blockDimOutput(MAX_THREAD_PER_BLOCK);
+		doActivationDeriv <<< gridDimOutput, blockDimOutput >>> (output_size, final_output_pre_activ, upstream_deriv, block_activation_deriv);
 
 
 		/* 2: (Transformed) Residual Derivs & Chained/Added to Conv Block Input Deriv (= prior_block_output_deriv) */
@@ -2298,8 +2321,11 @@ void backwards_pass(Train_ResNet * trainer){
 		}
 		else{
 			total_size = batch_size * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_spatial_dim) * (cur_conv_block_params -> incoming_filters);
-			setVal <<< ceil((float) total_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size, 0, conv_block_input_deriv);
-			addVec <<< ceil((float) total_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (total_size, conv_block_input_deriv, cur_conv_block_activation_derivs -> output, conv_block_input_deriv);
+
+			dim3 gridDimResidual(ceil((float) total_size / MAX_THREAD_PER_BLOCK));
+			dim3 blockDimResidual(MAX_THREAD_PER_BLOCK);
+			setVal <<< gridDimResidual, blockDimResidual >>> (total_size, 0, conv_block_input_deriv);
+			addVec <<< gridDimResidual, blockDimResidual >>> (total_size, conv_block_input_deriv, cur_conv_block_activation_derivs -> output, conv_block_input_deriv);
 		}
 		
 
@@ -3054,6 +3080,19 @@ void update_parameters(Train_ResNet * trainer){
 
 	int param_size;
 	float *model_location, *grad_location, * mean_location, * var_location;
+
+	/* DUMP THE STATE OF TRAINING PROCESS! */
+	// dumping every 10 batches, before update
+	// also dump when nan or inf occurs (data dumped to id=99999999)
+	int shard_n_images = trainer -> cur_batch -> shard_n_images;
+	int cur_shard_id = trainer -> cur_batch -> cur_shard_id;
+	// subtract 1 because incremented after loading...
+	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
+	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
+	if (dump_id % 100 == 0){
+		printf("DUMPING TRAINER...!\n\n");
+		dump_trainer(dump_id, trainer);
+	}
 	
 	for (int i = n_locations - 1; i >= 0; i--){
 		param_size = param_sizes[i];
@@ -3064,24 +3103,15 @@ void update_parameters(Train_ResNet * trainer){
 
 		check_errors(trainer, param_size, model_location, grad_location, mean_location, var_location, i);
 
-		updateMeans <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_mean_decay, mean_location, i);
-		updateVars <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, grad_location, base_var_decay, var_location, i);
-		updateParams <<< ceil((float) param_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (param_size, model_location, mean_location, var_location, learning_rate, weight_decay, cur_mean_decay, cur_var_decay, eps, i);
+		dim3 gridDimUpdate(ceil((float) param_size / MAX_THREAD_PER_BLOCK));
+		dim3 blockDimUpdate(MAX_THREAD_PER_BLOCK);
+		updateMeans <<< gridDimUpdate, blockDimUpdate >>> (param_size, grad_location, base_mean_decay, mean_location, i);
+		updateVars <<< gridDimUpdate, blockDimUpdate >>> (param_size, grad_location, base_var_decay, var_location, i);
+		updateParams <<< gridDimUpdate, blockDimUpdate >>> (param_size, model_location, mean_location, var_location, learning_rate, weight_decay, cur_mean_decay, cur_var_decay, eps, i);
 	}
 
 
-	/* DUMP THE STATE OF TRAINING PROCESS! */
-	// dumping every 10 batches
-	// also dump when nan or inf occurs (data dumped to id=99999999)
-	int shard_n_images = trainer -> cur_batch -> shard_n_images;
-	int cur_shard_id = trainer -> cur_batch -> cur_shard_id;
-	// subtract 1 because incremented after loading...
-	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
-	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
-	if (dump_id % 100 == 0){
-		printf("DUMPING TRAINER...!\n\n");
-		dump_trainer(dump_id, trainer);
-	} 
+	
 
 	/* RESET ALL VALUES TO 0 FOR NEXT PASS THROUGH BACKPROP */
 	for (int i = 0; i < n_locations; i++){
@@ -3104,8 +3134,8 @@ void update_parameters(Train_ResNet * trainer){
 
 void testTranspose(){
 
-	int orig_rows = max(1, rand() % 2048);
-	int orig_cols = max(1, rand() % 2048);
+	int orig_rows = 2048;
+	int orig_cols = 1000;
 
 	float * origMat_host = (float *) malloc(orig_rows * orig_cols * sizeof(float));
 	for (int i = 0; i < orig_rows; i++){
@@ -3147,9 +3177,9 @@ void testTranspose(){
 
 void testMatMul(){
 
-	int m = max(1, rand() % 512);
-	int k = max(1, rand() % 512);
-	int n = max(1, rand() % 512);
+	int m = 32;
+	int k = 2048;
+	int n = 1000;
 
 	float * A_host = (float *) malloc(m * k * sizeof(float));
 	float * B_host = (float *) malloc(k * n * sizeof(float));
@@ -3157,13 +3187,13 @@ void testMatMul(){
 
 	for (int i = 0; i < m; i++){
 		for (int j = 0; j < k; j++){
-			A_host[i * k + j] = ((float)(rand())/(float)(RAND_MAX));
+			A_host[i * k + j] = ((float)(rand())/(float)(RAND_MAX)) * (((int)(rand()) % 2) * 2 - 1);
 		}
 	}
 
 	for (int i = 0; i < k; i++){
 		for (int j = 0; j < n; j++){
-			B_host[i * n + j] = ((float)(rand())/(float)(RAND_MAX));
+			B_host[i * n + j] = ((float)(rand())/(float)(RAND_MAX))  * (((int)(rand()) % 2) * 2 - 1);
 		}
 	}
 
@@ -3193,14 +3223,19 @@ void testMatMul(){
 
 	float * C_kern_result = (float *) malloc(m * n * sizeof(float));
 
+	float eps = 0.00001;
+
 	cudaMemcpy(C_kern_result, C_dev, m * n * sizeof(float), cudaMemcpyDeviceToHost);
 
+	float cpu_val, gpu_val;
 	for (int i = 0; i < m; i++){
 		for (int j = 0; j < n; j++){
-			if (C_kern_result[i * n + j] != C_host[i * n + j]){
+			gpu_val = C_kern_result[i * n + j];
+			cpu_val = C_host[i * n + j];
+			if ( (gpu_val < (cpu_val - eps)) || (gpu_val > (cpu_val + eps)) ){
 				printf("MatMul ERROR: @ row: %d, col: %d\n", j, i);
-				printf("CPU Result: %f\n", C_host[i * n + j]);
-				printf("GPU Result: %f\n\n", C_kern_result[i * n + j]);
+				printf("CPU Result: %f\n", cpu_val);
+				printf("GPU Result: %f\n\n", gpu_val);
 			}
 		}
 	}
@@ -3510,6 +3545,10 @@ int main(int argc, char *argv[]) {
 		(trainer -> loss_per_epoch)[epoch] = epoch_loss;
 		epoch_accuracy = (total_images_per_epoch - epoch_n_wrong) / total_images_per_epoch;
 		(trainer -> accuracy_per_epoch)[epoch] = epoch_accuracy;
+
+		// reset batch to start from beginning of dataset
+		trainer -> cur_batch -> cur_shard_id = -1;
+		trainer -> cur_batch -> cur_batch_in_shard = -1;
 
 	}
 
