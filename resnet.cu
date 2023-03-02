@@ -2862,10 +2862,13 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	// input
 	size_t input_size = trainer -> cur_batch -> image_size * batch_size;
 	if (!is_deriv){
+		float * cpu_images = (float *) malloc(input_size * sizeof(float));
+		cudaMemcpy(cpu_images, trainer -> cur_batch -> images, input_size * sizeof(float), cudaMemcpyDeviceToHost);
 		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/input.buffer", dump_id);
 		fp = fopen(filepath, "wb");
-		n_wrote = fwrite(trainer -> cur_batch -> images_float_cpu, sizeof(float), input_size, fp);
+		n_wrote = fwrite(cpu_images, sizeof(float), input_size, fp);
 		fclose(fp);
+		free(cpu_images);
 		free(filepath);
 	}
 
