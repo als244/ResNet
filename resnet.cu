@@ -1594,6 +1594,18 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	memcpy(images_float_cpu, full_shard_images + cur_batch_in_shard * total_pixels, total_pixels * sizeof(float));
 	memcpy(correct_classes_cpu, full_shard_correct_classes + cur_batch_in_shard * batch_size, batch_size * sizeof(int));
 
+	bool is_all_zero = true;
+	for (int i = 0; i < total_pixels; i++){
+		if (images_float_cpu[i] != 0){
+			is_all_zero = false;
+			break;
+		}
+	}
+	if (is_all_zero){
+		printf("INPUT IMAGES, BATCH #%d = ALL ZERO... EXITING\n", cur_batch_in_shard);
+		exit(1);
+	}
+
 	
 	/* SAVING BATCH TO FILES FOR INSPECTION... */
 	// if (cur_batch_in_shard == 0){
@@ -3448,7 +3460,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.000001;
+	float LEARNING_RATE = 0.00002;
 	float WEIGHT_DECAY = 0.1;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
