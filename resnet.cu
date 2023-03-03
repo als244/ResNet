@@ -929,7 +929,7 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	float mean_adj = means[i] / (1 - cur_mean_decay);
 	float var_adj = vars[i] / (1 - cur_var_decay);
 	float old_model_param = model_params[i];
-	model_params[i] = model_params[i] - learning_rate * ((mean_adj / (sqrtf(var_adj) + eps)) + weight_decay * old_model_param);
+	model_params[i] = model_params[i] - (learning_rate * (mean_adj / (sqrtf(var_adj) + eps)) + weight_decay * old_model_param);
 	if (isnan(model_params[i])){
 		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value\n", loc_ind, i);
 		model_params[i] = old_model_param;
