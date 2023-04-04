@@ -586,14 +586,14 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	float partial_var_deriv = 0; 
 	float norm_temp_deriv_val;
 	float filt_var_three_halfs_power = -0.5 * powf(var_val + eps, -1.5);
-	float filt_var_recip_sqrt = -1.0 / sqrtf(var_val + eps);
+	float neg_filt_var_recip_sqrt = -1.0 / sqrtf(var_val + eps);
 	for (int s = 0; s < batch_size; s++){
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
 				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
 				norm_temp_deriv_val = normalized_temp_deriv[index];
 				dVar += norm_temp_deriv_val * (input[index] - mean_val) * filt_var_three_halfs_power;
-				dMean += norm_temp_deriv_val * filt_var_recip_sqrt;
+				dMean += norm_temp_deriv_val * neg_filt_var_recip_sqrt;
 				partial_var_deriv += -2 * (input[index] - mean_val);
 			}
 		}
@@ -608,7 +608,7 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
 				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
-				input_deriv[index] = normalized_temp_deriv[index] * filt_var_recip_sqrt + dVar * (2 * (input[index] - mean_val)) / n_samples + dMean / n_samples;
+				input_deriv[index] = normalized_temp_deriv[index] * (-1 * neg_filt_var_recip_sqrt) + dVar * (2 * (input[index] - mean_val)) / n_samples + dMean / n_samples;
 			}
 		}
 	}
@@ -2803,6 +2803,16 @@ void dump_conv_block_activation(int dump_id, Train_ResNet * trainer, Activation_
 	dump_batch_norm_cache(trainer, batchnorm_filepath_dup, activation_conv_block -> norm_post_expanded);
 	free(batchnorm_filepath_dup);
 
+	/* EXPANDED NORM VALUES */
+	float * cpu_expanded_norm = (float *) malloc(expanded_size * sizeof(float));
+	cudaMemcpy(cpu_expanded_norm, activation_conv_block -> post_expanded_norm_vals, expanded_size * sizeof(float), cudaMemcpyDeviceToHost);
+	print_ret = asprintf(&filepath_dup, "%sexpanded_post_norm.buffer", filepath);
+	fp = fopen(filepath_dup, "wb");
+	n_wrote = fwrite(cpu_expanded_norm, sizeof(float), expanded_size, fp);
+	fclose(fp);
+	free(filepath_dup);
+	free(cpu_expanded_norm);
+
 
 	/* (TRANSFORMED) RESIDUAL */
 
@@ -3104,7 +3114,7 @@ void update_parameters(Train_ResNet * trainer){
 	// subtract 1 because incremented after loading...
 	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
 	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
-	if (dump_id % 1000 == 0){
+	if (dump_id % 1 == 0){
 		printf("DUMPING TRAINER...!\n\n");
 		dump_trainer(dump_id, trainer);
 	}
@@ -3449,7 +3459,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.00001;
+	float LEARNING_RATE = 0.0001;
 	float WEIGHT_DECAY = 0;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
