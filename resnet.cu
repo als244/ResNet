@@ -1001,7 +1001,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	float * bias_depth_reduction, * bias_spatial, * bias_depth_expansion;
 	int depth_reduction_size, spatial_size, depth_expansion_size;
 	int bias_depth_reduction_size, bias_spatial_size, bias_depth_expansion_size;
-	float depth_reduction_fan_in, spatial_fan_in, depth_expansion_fan_in;
+	float depth_reduction_fan_in_plus_fan_out, spatial_fan_in_plus_fan_out, depth_expansion_fan_in_plus_fan_out;
 
 	BatchNorm *norm_depth_reduction, *norm_spatial, *norm_expansion, *norm_projection;
 
