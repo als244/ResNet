@@ -1062,7 +1062,7 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 	conv_block -> depth_expansion = depth_expansion;
 	conv_block -> bias_depth_expansion = bias_depth_expansion;
 
-	norm_expansion = init_batch_norm(incoming_spatial_dim, expanded_depth, 0.0, is_zero);
+	norm_expansion = init_batch_norm(incoming_spatial_dim, expanded_depth, 1.0, is_zero);
 	conv_block -> norm_expansion = norm_expansion;
 
 	float * projection, *bias_projection;
