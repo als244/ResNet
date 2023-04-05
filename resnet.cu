@@ -2129,9 +2129,9 @@ void backwards_pass(Train_ResNet * trainer){
 	// divide by the batch size because loss is sum across all batches...
 	// NOT SURE IF WE WANT TO DO AVERAGE HERE OR NOT...?
 	
-	dim3 gridDimTakeAvgDeriv(output_dim);
-	dim3 blockDimTakeAvgDeriv(batch_size);
-	averageDerivOverBatchSize <<< gridDimTakeAvgDeriv, blockDimTakeAvgDeriv >>> (output_layer_deriv, output_dim, batch_size);
+	// dim3 gridDimTakeAvgDeriv(output_dim);
+	// dim3 blockDimTakeAvgDeriv(batch_size);
+	// averageDerivOverBatchSize <<< gridDimTakeAvgDeriv, blockDimTakeAvgDeriv >>> (output_layer_deriv, output_dim, batch_size);
 
 	printDeviceData("CROSS ENTROPY DERIV", output_layer_deriv, print_size);
 
@@ -3459,7 +3459,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.00001;
+	float LEARNING_RATE = 0.000001;
 	float WEIGHT_DECAY = 0;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
