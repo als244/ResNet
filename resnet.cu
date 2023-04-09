@@ -3540,7 +3540,7 @@ int main(int argc, char *argv[]) {
 			for (int s = 0; s < BATCH_SIZE; s++){
 				val_pred_correct = pred[s * BATCH_SIZE + correct[s]];
 				for (int c = 0; c < N_CLASSES; c++){
-					if ((c != correct[s]) && (pred[s * BATCH_SIZE + correct[s]] >= val_pred_correct)){
+					if ((c != correct[s]) && (pred[s * BATCH_SIZE + c] >= val_pred_correct)){
 						batch_n_wrong++;
 						break;
 					}
