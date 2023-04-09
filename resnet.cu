@@ -3466,7 +3466,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.0000001;
+	float LEARNING_RATE = 0.0001;
 	float WEIGHT_DECAY = 0;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
@@ -3530,7 +3530,7 @@ int main(int argc, char *argv[]) {
 			// loss
 			batch_loss = 0;
 			for (int s = 0; s < BATCH_SIZE; s++){
-				batch_loss += -1 * logf(pred[correct[s] * BATCH_SIZE + s]);
+				batch_loss += -1 * logf(pred[s * BATCH_SIZE + correct[s]]);
 			}
 			avg_batch_loss = batch_loss / BATCH_SIZE;
 			epoch_loss += batch_loss;
@@ -3538,9 +3538,9 @@ int main(int argc, char *argv[]) {
 			// accuracy
 			batch_n_wrong = 0;
 			for (int s = 0; s < BATCH_SIZE; s++){
-				val_pred_correct = pred[correct[s] * BATCH_SIZE + s];
+				val_pred_correct = pred[s * BATCH_SIZE + correct[s]];
 				for (int c = 0; c < N_CLASSES; c++){
-					if ((c != correct[s]) && (pred[c * BATCH_SIZE + s] >= val_pred_correct)){
+					if ((c != correct[s]) && (pred[s * BATCH_SIZE + correct[s]] >= val_pred_correct)){
 						batch_n_wrong++;
 						break;
 					}
