@@ -3523,14 +3523,14 @@ int main(int argc, char *argv[]) {
 
 			/* RECORD LOSS AND ACCURACY */
 
-			// dimensions of pred: (N_CLASSES, BATCH_SIZE)
+			// dimensions of pred: (BATCH_SIZE, N_CLASSES)
 			pred = trainer -> forward_buffer -> pred_cpu;
 			correct = trainer -> cur_batch -> correct_classes_cpu;
 			
 			// loss
 			batch_loss = 0;
 			for (int s = 0; s < BATCH_SIZE; s++){
-				batch_loss += -1 * logf(pred[s * BATCH_SIZE + correct[s]]);
+				batch_loss += -1 * logf(pred[s * N_CLASSES + correct[s]]);
 			}
 			avg_batch_loss = batch_loss / BATCH_SIZE;
 			epoch_loss += batch_loss;
@@ -3538,9 +3538,9 @@ int main(int argc, char *argv[]) {
 			// accuracy
 			batch_n_wrong = 0;
 			for (int s = 0; s < BATCH_SIZE; s++){
-				val_pred_correct = pred[s * BATCH_SIZE + correct[s]];
+				val_pred_correct = pred[s * N_CLASSES + correct[s]];
 				for (int c = 0; c < N_CLASSES; c++){
-					if ((c != correct[s]) && (pred[s * BATCH_SIZE + c] >= val_pred_correct)){
+					if ((c != correct[s]) && (pred[s * N_CLASSES + c] >= val_pred_correct)){
 						batch_n_wrong++;
 						break;
 					}
