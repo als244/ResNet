@@ -588,7 +588,7 @@ __global__ void doRecomputeBatchNormAndActivate(int size, const float * input, c
 
 __global__ void activationAndBatchNormDeriv(const float * input, const float * gamma, const float * beta, 
 									int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars, const float * activated,
-									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * input_deriv, bool to_activate_deriv){
+									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * deriv_sums, float * deriv_mult_sums, float * input_deriv, bool to_activate_deriv){
 	
 	
 	int filter_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -634,19 +634,31 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	// save down dGamma and dBeta so optimzer can update parameters
 	gamma_deriv[filter_id] = dGamma;
 	beta_deriv[filter_id] = dBeta;
-
-	// compute dL/dX (aka w.r.t. to input to batch norm which is typically the output of a conv)
-	// saving input_deriv so backprop can continue to previous layer
-	for (int s = 0; s < batch_size; s++){
-		for (int i = 0; i < spatial_dim; i++){
-			for (int j = 0; j < spatial_dim; j++){
-				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
-				normalized_temp_val = (input[index] - mean_val) / sqrtf(var_val + eps);
-				input_deriv[index] = (n_samples * normalized_temp_deriv[index] - deriv_sum - normalized_temp_val * deriv_mult_sum) / (n_samples * sqrtf(var_val + eps));
-			}
-		}
-	}
+	deriv_sums[filter_id] = deriv_sum;
+	deriv_mult_sums[filter_id] = deriv_mult_sum;
 }
+
+
+__global__ void batchNormInputDeriv(int total_size, const float * input, int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars,
+									const float * normalized_temp_deriv, const float * deriv_sums, const float * deriv_mult_sums, float * input_deriv){
+
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= total_size){
+		return;
+	}
+	int filter_id = index % filters;
+	float mean = means[filter_id];
+	float var = vars[filter_id];
+	float deriv_sum = deriv_sums[filter_id];
+	float deriv_mult_sum = deriv_mult_sums[filter_id];
+	int n_samples = batch_size * spatial_dim * spatial_dim;
+
+	float normalized_temp_val = (input[index] - mean) / sqrtf(var + eps);
+	input_deriv[index] = (n_samples * normalized_temp_deriv[index] - deriv_sum - normalized_temp_val * deriv_mult_sum) / (n_samples * sqrtf(var + eps));
+
+
+}
+
 
 
 // assume grid launch of (SPATIAL_OUT_DIM, SPATIAL_OUT_DIM) and block dim of (FILTERS)
@@ -1704,6 +1716,13 @@ void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cach
 
 	float * normalized_temp_deriv;
 	cudaMalloc(&normalized_temp_deriv, batch_size * filters * spatial_dim * spatial_dim * sizeof(float));
+
+	float * deriv_sums;
+	cudaMalloc(&deriv_sums, filters * sizeof(float));
+
+	float * deriv_mult_sums;
+	cudaMalloc(&deriv_mult_sums, filters * sizeof(float));
+
 	float * gamma_deriv = batch_norm_param_derivs -> gamma;
 	float * beta_deriv = batch_norm_param_derivs -> beta;
 
@@ -1715,9 +1734,20 @@ void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cach
 
 	dim3 gridDimBatchNormDeriv(num_blocks);
 	dim3 blockDimBatchNormDeriv(num_threads);
-	activationAndBatchNormDeriv <<< gridDimBatchNormDeriv, blockDimBatchNormDeriv >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv, to_activate_deriv);
+	activationAndBatchNormDeriv <<< gridDimBatchNormDeriv, blockDimBatchNormDeriv >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, deriv_sums, deriv_mult_sums, input_deriv, to_activate_deriv);
+
+	int total_size = batch_size * filters * spatial_dim * spatial_dim;
+	num_threads = MAX_THREAD_PER_BLOCK;
+	num_blocks = ceil((float) (total_size) / (float) MAX_THREAD_PER_BLOCK);
+
+	dim3 gridDimBatchNormInpDeriv(num_blocks);
+	dim3 blockDimBatchNormInpDeriv(num_threads);
+
+	batchNormInputDeriv <<< gridDimBatchNormInpDeriv, blockDimBatchNormInpDeriv >>> (total_size, input, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp_deriv, deriv_sums, deriv_mult_sums, input_deriv);
 
 	cudaFree(normalized_temp_deriv);
+	cudaFree(deriv_sums);
+	cudaFree(deriv_mult_sums);
 
 }
 
