@@ -106,16 +106,13 @@ typedef struct {
 	// applying first layer in block to output of previous block and adding bias
 	float *post_reduced;
 	Cache_BatchNorm * norm_post_reduced;
-	float *post_reduced_activated;
-
+	
 	// applying second layer in block to depth_reduced and adding bias
 	float *post_spatial;
 	Cache_BatchNorm * norm_post_spatial;
-	float *post_spatial_activated;
 
 	float *post_expanded;
 	Cache_BatchNorm * norm_post_expanded;
-	float *post_expanded_norm_vals;
 
 	// if input dim of block != output dim of block, need to apply a transform 
 	// (otherwise null which implies identity of output of previous block)
@@ -124,10 +121,9 @@ typedef struct {
 	float * post_projection_norm_vals;
 	// occurs after adding last layer to residual connection
 	// adding transformed_residual (or equivalently input of block == output of prev block) to norm_post_expanded -> normalized
+	// not adding/activating because can do that "virtually" (i.e. within the conv kernel of next block) and save memory
 	float *output;
 	
-	// applying ReLU
-	float *output_activated;
 } Activation_ConvBlock;
 
 
