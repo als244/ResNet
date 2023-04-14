@@ -497,34 +497,27 @@ __global__ void doBatchNormAndActivate(const float * input, const float * gamma,
 	}
 }
 
-
-__global__ void doRecomputeBatchNormAndActivate(const float * input, const float * gamma, const float * beta,
+// Launch with gridDim = batch_size * filters * spatial_dim * spatial_dim / MAX_THREADS and blockDim = MAX_THREADS
+__global__ void doRecomputeBatchNormAndActivate(int size, const float * input, const float * gamma, const float * beta,
 								int spatial_dim, int filters, int batch_size, float eps, float * means, float * vars, float * out, bool to_activate){
 
-	int filter_id = blockIdx.x * blockDim.x + threadIdx.x;
-	if (filter_id >= filters){
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= size){
 		return;
 	}
+	int filter_id = index % filters;
 
 	float mean, var;
 	mean = means[filter_id];
 	var = vars[filter_id];
-	int inp_index;
 	float normalized_temp_val, normalized_val;
-	for (int s = 0; s < batch_size; s++){
-		for (int i = 0; i < spatial_dim; i++){
-			for (int j = 0; j < spatial_dim; j++){
-				inp_index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
-				normalized_temp_val = (input[inp_index] - mean) / sqrtf(var + eps);
-				normalized_val = gamma[filter_id] * normalized_temp_val + beta[filter_id];
-				if (to_activate){
-					out[inp_index] = fmaxf(normalized_val, 0); 
-				}
-				else{
-					out[inp_index] = normalized_val;
-				}
-			}
-		}
+	normalized_temp_val = (input[index] - mean) / sqrtf(var + eps);
+	normalized_val = gamma[filter_id] * normalized_temp_val + beta[filter_id];
+	if (to_activate){
+		out[index] = fmaxf(normalized_val, 0); 
+	}
+	else{
+		out[index] = normalized_val;
 	}
 }
 
@@ -533,6 +526,84 @@ __global__ void doRecomputeBatchNormAndActivate(const float * input, const float
 // could also use shared memory here if want to be faster
 // input is the output of convolution
 // ASSUME reLU activation function
+// __global__ void activationAndBatchNormDerivOld(const float * input, const float * gamma, const float * beta, 
+// 									int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars, const float * activated,
+// 									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * input_deriv, bool to_activate_deriv){
+	
+	
+// 	int filter_id = blockIdx.x * blockDim.x + threadIdx.x;
+// 	if (filter_id >= filters){
+// 		return;
+// 	}
+
+// 	float n_samples = batch_size * spatial_dim * spatial_dim;
+// 	float gamma_val = gamma[filter_id];
+// 	float mean_val = means[filter_id];
+// 	float var_val = vars[filter_id];
+
+// 	// first compute dL/activated (relu deriv) and then dL/dNormalized_Temp (== x hat)
+// 	// also can compute dL/dGamma and dL/dBeta (parameters of batch norm)
+// 	int index;
+// 	float dGamma = 0;
+// 	float dBeta = 0;
+// 	float activated_val, out_layer_deriv_val, normalized_temp_val;
+// 	for (int s = 0; s < batch_size; s++){
+// 		for (int i = 0; i < spatial_dim; i++){
+// 			for (int j = 0; j < spatial_dim; j++){
+// 				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
+// 				activated_val = activated[index];
+// 				if (to_activate_deriv && (activated_val <= 0)) {
+// 					normalized_temp_deriv[index] = 0;
+// 				}
+// 				else{
+// 					out_layer_deriv_val = out_layer_deriv[index];
+// 					normalized_temp_val = (input[index] - mean_val) / sqrtf(var_val + eps);
+// 					normalized_temp_deriv[index] = out_layer_deriv_val * gamma_val;
+// 					dGamma += out_layer_deriv_val * normalized_temp_val;
+// 					dBeta += out_layer_deriv_val;
+// 				}
+// 			}
+// 		}
+// 	}
+
+// 	// save down dGamma and dBeta so optimzer can update parameters
+// 	gamma_deriv[filter_id] = dGamma;
+// 	beta_deriv[filter_id] = dBeta;
+
+// 	// compute dL/dVar and most of dL/dMean
+// 	float dVar = 0;
+// 	float dMean = 0;
+// 	float partial_var_deriv = 0; 
+// 	float norm_temp_deriv_val;
+// 	float filt_var_three_halfs_power = -0.5 * powf(var_val + eps, -1.5);
+// 	float neg_filt_var_recip_sqrt = -1.0 / sqrtf(var_val + eps);
+// 	for (int s = 0; s < batch_size; s++){
+// 		for (int i = 0; i < spatial_dim; i++){
+// 			for (int j = 0; j < spatial_dim; j++){
+// 				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
+// 				norm_temp_deriv_val = normalized_temp_deriv[index];
+// 				dVar += norm_temp_deriv_val * (input[index] - mean_val) * filt_var_three_halfs_power;
+// 				dMean += norm_temp_deriv_val * neg_filt_var_recip_sqrt;
+// 				partial_var_deriv += -2 * (input[index] - mean_val);
+// 			}
+// 		}
+// 	}
+
+// 	// finish off dL/dMean
+// 	dMean += dVar * partial_var_deriv / n_samples;
+
+// 	// compute dL/dX (aka w.r.t. to input to batch norm which is typically the output of a conv)
+// 	// saving input_deriv so backprop can continue to previous layer
+// 	for (int s = 0; s < batch_size; s++){
+// 		for (int i = 0; i < spatial_dim; i++){
+// 			for (int j = 0; j < spatial_dim; j++){
+// 				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
+// 				input_deriv[index] = normalized_temp_deriv[index] * (-1 * neg_filt_var_recip_sqrt) + dVar * (2 * (input[index] - mean_val)) / n_samples + dMean / n_samples;
+// 			}
+// 		}
+// 	}
+// }
+
 __global__ void activationAndBatchNormDeriv(const float * input, const float * gamma, const float * beta, 
 									int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars, const float * activated,
 									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * input_deriv, bool to_activate_deriv){
@@ -553,7 +624,9 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	int index;
 	float dGamma = 0;
 	float dBeta = 0;
-	float activated_val, out_layer_deriv_val, normalized_temp_val;
+	float deriv_sum = 0;
+	float deriv_mult_sum = 0;
+	float activated_val, out_layer_deriv_val, normalized_temp_val, normalized_temp_deriv_val;
 	for (int s = 0; s < batch_size; s++){
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
@@ -565,9 +638,12 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 				else{
 					out_layer_deriv_val = out_layer_deriv[index];
 					normalized_temp_val = (input[index] - mean_val) / sqrtf(var_val + eps);
-					normalized_temp_deriv[index] = out_layer_deriv_val * gamma_val;
+					normalized_temp_deriv_val = out_layer_deriv_val * gamma_val;
+					deriv_sum += normalized_temp_deriv_val;
+					deriv_mult_sum += normalized_temp_deriv_val * normalized_temp_val;
 					dGamma += out_layer_deriv_val * normalized_temp_val;
 					dBeta += out_layer_deriv_val;
+					normalized_temp_deriv[index] = normalized_temp_deriv_val;
 				}
 			}
 		}
@@ -577,35 +653,14 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	gamma_deriv[filter_id] = dGamma;
 	beta_deriv[filter_id] = dBeta;
 
-	// compute dL/dVar and most of dL/dMean
-	float dVar = 0;
-	float dMean = 0;
-	float partial_var_deriv = 0; 
-	float norm_temp_deriv_val;
-	float filt_var_three_halfs_power = -0.5 * powf(var_val + eps, -1.5);
-	float neg_filt_var_recip_sqrt = -1.0 / sqrtf(var_val + eps);
-	for (int s = 0; s < batch_size; s++){
-		for (int i = 0; i < spatial_dim; i++){
-			for (int j = 0; j < spatial_dim; j++){
-				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
-				norm_temp_deriv_val = normalized_temp_deriv[index];
-				dVar += norm_temp_deriv_val * (input[index] - mean_val) * filt_var_three_halfs_power;
-				dMean += norm_temp_deriv_val * neg_filt_var_recip_sqrt;
-				partial_var_deriv += -2 * (input[index] - mean_val);
-			}
-		}
-	}
-
-	// finish off dL/dMean
-	dMean += dVar * partial_var_deriv / n_samples;
-
 	// compute dL/dX (aka w.r.t. to input to batch norm which is typically the output of a conv)
 	// saving input_deriv so backprop can continue to previous layer
 	for (int s = 0; s < batch_size; s++){
 		for (int i = 0; i < spatial_dim; i++){
 			for (int j = 0; j < spatial_dim; j++){
 				index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
-				input_deriv[index] = normalized_temp_deriv[index] * (-1 * neg_filt_var_recip_sqrt) + dVar * (2 * (input[index] - mean_val)) / n_samples + dMean / n_samples;
+				normalized_temp_val = (input[index] - mean_val) / sqrtf(var_val + eps);
+				input_deriv[index] = (n_samples * normalized_temp_deriv[index] - deriv_sum - normalized_temp_val * deriv_mult_sum) / (n_samples * sqrtf(var_val + eps));
 			}
 		}
 	}
@@ -1639,15 +1694,13 @@ void prepareAndDoRecomputeBNActivation(float * input, BatchNorm * batch_norm_par
 	float * means_out = batch_norm_cache -> means;
 	float * vars_out = batch_norm_cache -> vars;
 
-	int num_threads = min(MAX_THREAD_PER_BLOCK_INCL_REG, filters);
-	int num_blocks = 1;
-	if (filters > num_threads){
-		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
-	}
+	int total_size = batch_size * filters * spatial_dim * spatial_dim;
+	int num_threads = MAX_THREAD_PER_BLOCK;
+	int num_blocks = ceil((float) (total_size) / (float) MAX_THREAD_PER_BLOCK);
 
 	dim3 gridDimBatchNorm(num_blocks);
 	dim3 blockDimBatchNorm(num_threads);
-	doRecomputeBatchNormAndActivate<<< gridDimBatchNorm, blockDimBatchNorm >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, out, to_activate);
+	doRecomputeBatchNormAndActivate<<< gridDimBatchNorm, blockDimBatchNorm >>> (total_size, input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, out, to_activate);
 }
 
 void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, 
