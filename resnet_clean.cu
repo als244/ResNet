@@ -444,8 +444,7 @@ __global__ void convolutionDerivWeights(const float * input, const float * weigh
 // could also use shared memory here if want to be faster
 // input is the output of convolution
 // ASSUME reLU activation function
-__global__ void doBatchNormAndActivate(const float * input, const float * gamma, const float * beta,
-								int spatial_dim, int filters, int batch_size, float eps, float * means, float * vars, float * activated, bool to_activate){
+__global__ void getMeansAndVars(const float * input, int spatial_dim, int filters, int batch_size, float * means, float * vars){
 
 	int filter_id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (filter_id >= filters){
@@ -478,23 +477,6 @@ __global__ void doBatchNormAndActivate(const float * input, const float * gamma,
 
 	var = var_sum / (batch_size * spatial_dim * spatial_dim);
 	vars[filter_id] = var;
-
-	float normalized_temp_val, normalized_val;
-	for (int s = 0; s < batch_size; s++){
-		for (int i = 0; i < spatial_dim; i++){
-			for (int j = 0; j < spatial_dim; j++){
-				inp_index = spatial_dim * spatial_dim * filters * s + spatial_dim * filters * i + filters * j + filter_id;
-				normalized_temp_val = (input[inp_index] - mean) / sqrtf(var + eps);
-				normalized_val = gamma[filter_id] * normalized_temp_val + beta[filter_id];
-				if (to_activate){
-					activated[inp_index] = fmaxf(normalized_val, 0); 
-				}
-				else{
-					activated[inp_index] = normalized_val;
-				}
-			}
-		}
-	}
 }
 
 // Launch with gridDim = batch_size * filters * spatial_dim * spatial_dim / MAX_THREADS and blockDim = MAX_THREADS
@@ -1677,9 +1659,17 @@ void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_Batch
 		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
 	}
 
+	dim3 gridDimMeansAndVars(num_blocks);
+	dim3 blockDimMeansAndVars(num_threads);
+	getMeansAndVars <<< gridDimMeansAndVars, blockDimMeansAndVars >>> (input, spatial_dim, filters, batch_size, means_out, vars_out);
+
+	int total_size = batch_size * filters * spatial_dim * spatial_dim;
+	num_threads = MAX_THREAD_PER_BLOCK;
+	num_blocks = ceil((float) (total_size) / (float) MAX_THREAD_PER_BLOCK);
+
 	dim3 gridDimBatchNorm(num_blocks);
 	dim3 blockDimBatchNorm(num_threads);
-	doBatchNormAndActivate<<< gridDimBatchNorm, blockDimBatchNorm >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, activated_out, to_activate);
+	doRecomputeBatchNormAndActivate<<< gridDimBatchNorm, blockDimBatchNorm >>> (total_size, input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, activated_out, to_activate);
 }
 
 void prepareAndDoRecomputeBNActivation(float * input, BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, int batch_size, float eps, float * out, bool to_activate){
