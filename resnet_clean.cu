@@ -2351,9 +2351,13 @@ void backwards_pass(Train_ResNet * trainer){
 													conv_input_deriv, conv_weight_deriv, true);
 
 		cudaFree(bn_input_deriv);
-		cudaFree(conv_block_input_activated);
+		
 
 		prev_conv_block_input_deriv = conv_block_input_deriv;
+
+		if (i != 0){
+			cudaFree(conv_block_input_activated);
+		}
 
 	}
 
@@ -2386,6 +2390,8 @@ void backwards_pass(Train_ResNet * trainer){
 
 	// compute max pool deriv (i.e. populate maxpool_inp_deriv)
 	maxPoolDeriv <<< gridDimMaxPoolDeriv, blockDimMaxPoolDeriv >>> (max_inds, maxpool_out_deriv, maxpool_kern_dim, maxpool_in_spatial_dim, maxpool_stride, maxpool_filters, batch_size, maxpool_inp_deriv);
+
+	cudaFree(conv_block_input_deriv);
 
 	/* STEP 6: INIT BATCH NORM & CONV DERIV */
 
