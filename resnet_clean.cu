@@ -911,10 +911,6 @@ ConvBlock * init_conv_block(int incoming_filters, int incoming_spatial_dim, int 
 		init_weights_gaussian_device(gen, depth_expansion_size, depth_expansion, 0, 2.0 / depth_expansion_fan_in_plus_fan_out);
 	}
 
-	bias_depth_expansion_size = expanded_depth;
-	cudaMalloc(&bias_depth_expansion, bias_depth_expansion_size * sizeof(float));
-	cudaMemset(bias_depth_expansion, 0, bias_depth_expansion_size * sizeof(float));
-
 	conv_block -> depth_reduction = depth_reduction;
 	conv_block -> norm_depth_reduction = norm_depth_reduction;
 
@@ -1249,7 +1245,7 @@ Activations * init_activations(Dims * dims, ConvBlock ** conv_blocks, int batch_
 	Activation_ConvBlock ** activation_conv_blocks = (Activation_ConvBlock **) malloc(n_conv_blocks * sizeof(Activation_ConvBlock *));
 	for (int i = 0; i < n_conv_blocks; i++){
 		ConvBlock * conv_block = conv_blocks[i];
-		activation_conv_blocks[i] = init_activation_convblock(conv_block, batch_size, is_forwards);
+		activation_conv_blocks[i] = init_activation_convblock(conv_block, batch_size);
 	}
 
 	activations -> activation_conv_blocks = activation_conv_blocks;
@@ -1312,7 +1308,7 @@ Backprop_Buffer * init_backprop_buffer(Dims * dims, ConvBlock ** conv_blocks, in
 }
 
 
-Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, float learning_rate, float weight_decay, float mean_decay, float var_decay, float eps, int n_epochs){
+Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, float learning_rate, float weight_decay, float mean_decay, float var_decay, float eps, int n_epochs, int total_images){
 	Train_ResNet * trainer = (Train_ResNet *) malloc(sizeof(Train_ResNet));
 
 	trainer -> model = model;
@@ -1331,9 +1327,14 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 	trainer -> base_var_decay = var_decay;
 	trainer -> cur_mean_decay = 1;
 	trainer -> cur_var_decay = 1;
+	
 	trainer -> eps = eps;
 
+	trainer -> cur_epoch = 0;
 	trainer -> n_epochs = n_epochs;
+	trainer -> total_images = total_images;
+
+	trainer -> cur_dump_id = -1;
 
 	trainer -> loss_per_epoch = (float *) calloc(n_epochs, sizeof(float));
 	trainer -> accuracy_per_epoch = (float *) calloc(n_epochs, sizeof(float));
@@ -1379,7 +1380,7 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim, int shar
 
 // (if this takes too long, can do it in parallel with separate process on cpu)
 // ASSUMING shard_n_images % batch_size = 0
-void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
+void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Batch * batch_buffer){
 	
 	int batch_size = batch_buffer -> n_images;
 	int image_size = batch_buffer -> image_size;
@@ -1397,6 +1398,8 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	int cur_shard_id = batch_buffer -> cur_shard_id;
 	int cur_batch_in_shard = batch_buffer -> cur_batch_in_shard;
 	int shard_n_images = batch_buffer -> shard_n_images;
+	
+	int cur_dump_id = trainer -> cur_dump_id;
 
 
 
@@ -1454,6 +1457,10 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	// update cur batch for next iteration of loading
 	cur_batch_in_shard++;
 	batch_buffer -> cur_batch_in_shard = cur_batch_in_shard;
+
+	cur_dump_id++;
+	trainer -> cur_dump_id = cur_dump_id;
+
 
 }
 
@@ -1545,7 +1552,7 @@ void prepareAndDoConvolution(int in_spatial_dim, int kern_dim, int in_filters, i
 	dim3 gridDimConv(out_spatial_dim, out_spatial_dim, out_filters_grid);
 	dim3 blockDimConv(batch_size, out_filters_block);
 
-	doConvolution <<< gridDimConv, blockDimConv>>> (input, weights, biases, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, output);
+	doConvolution <<< gridDimConv, blockDimConv>>> (input, weights, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, output);
 }
 
 
@@ -1934,6 +1941,8 @@ void backwards_pass(Train_ResNet * trainer){
 	int n_conv_blocks = dims -> n_conv_blocks;
 	Activation_ConvBlock ** activation_conv_blocks = activations -> activation_conv_blocks;
 	ConvBlock ** conv_block_params = model_params -> conv_blocks;
+
+	ConvBlock ** conv_block_param_derivs = param_derivs -> conv_blocks;
 
 	int final_spatial_dim = conv_block_params[n_conv_blocks - 1] -> incoming_spatial_dim;
 	
@@ -2456,16 +2465,6 @@ void dump_batch_norm_cache(Train_ResNet * trainer, char * filepath, Cache_BatchN
 	fclose(fp);
 	free(cpu_vars);
 	free(filepath_new);
-
-	print_ret = asprintf(&filepath_new, "%snorm_temp.buffer", filepath);
-	float * cpu_norm_temp = (float *) malloc(input_size * sizeof(float));
-	cudaMemcpy(cpu_norm_temp, cache_batchnorm -> normalized_temp, input_size * sizeof(float), cudaMemcpyDeviceToHost);
-	fp = fopen(filepath_new, "wb");
-	n_wrote = fwrite(cpu_norm_temp, sizeof(float), input_size, fp);
-	fclose(fp);
-	free(cpu_norm_temp);
-	free(filepath_new);
-
 }
 
 void dump_conv_block_activation(int dump_id, Train_ResNet * trainer, Activation_ConvBlock * activation_conv_block, int conv_block_ind, bool is_deriv){
@@ -2856,6 +2855,7 @@ void update_parameters(Train_ResNet * trainer){
 	float cur_mean_decay = trainer -> cur_mean_decay * base_mean_decay;
 	float cur_var_decay = trainer -> cur_var_decay * base_var_decay;
 	float eps = trainer -> eps;
+	int cur_epoch = trainer -> cur_epoch;
 
 	Params * model_params = trainer -> model -> params;
 	float ** model_params_locations = model_params -> locations;
@@ -2878,14 +2878,10 @@ void update_parameters(Train_ResNet * trainer){
 	/* DUMP THE STATE OF TRAINING PROCESS! */
 	// dumping every 10 batches, before update
 	// also dump when nan or inf occurs (data dumped to id=99999999)
-	int shard_n_images = trainer -> cur_batch -> shard_n_images;
-	int cur_shard_id = trainer -> cur_batch -> cur_shard_id;
-	// subtract 1 because incremented after loading...
-	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
-	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
-	if (dump_id % 1000 == 0){
-		printf("DUMPING TRAINER...!\n\n");
-		dump_trainer(dump_id, trainer);
+	int cur_dump_id = trainer -> cur_dump_id;
+	if (cur_dump_id % 1000 == 0){
+		printf("DUMPING TRAINER...(id = %d)!\n\n", cur_dump_id);
+		dump_trainer(cur_dump_id, trainer);
 	}
 	
 	for (int i = n_locations - 1; i >= 0; i--){
@@ -3046,7 +3042,7 @@ void testMatMul(){
 }
 
 void testConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_filters,  int stride, int batch_size, 
-																float * input, float * weights, float * biases, float * output){
+																float * input, float * weights, float * output){
 
 	printf("\n\n* TESTING THE CONVOLUTION KERNEL *\n\n");
 	/* FIRST DO COMPUTATION ON GPU */
@@ -3062,7 +3058,7 @@ void testConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_f
 
 	printf("Computing Convolution on GPU...\n");
 
-	doConvolution <<< gridDimConv, blockDimConv>>> (input, weights, biases, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, output);
+	doConvolution <<< gridDimConv, blockDimConv>>> (input, weights, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, output);
 
 	cudaDeviceSynchronize();
 
@@ -3078,9 +3074,6 @@ void testConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_f
 
 	float * weights_cpu = (float *) malloc(kern_dim * kern_dim * in_filters * out_filters * sizeof(float));
 	cudaMemcpy(weights_cpu, weights, kern_dim * kern_dim * in_filters * out_filters * sizeof(float), cudaMemcpyDeviceToHost);
-
-	float * biases_cpu = (float *) malloc(out_filters * sizeof(float));
-	cudaMemcpy(biases_cpu, biases, out_filters * sizeof(float), cudaMemcpyDeviceToHost);
 
 	float * cpu_output = (float *) malloc(batch_size * out_spatial_dim * out_spatial_dim * out_filters * sizeof(float));
 
@@ -3119,7 +3112,6 @@ void testConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_f
 							}
 						}
 					}
-					cpu_output[output_ind] += biases_cpu[out_filt];
 				}
 			}
 		}
@@ -3156,7 +3148,6 @@ void testConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_f
 	free(gpu_output_on_cpu);
 	free(input_cpu);
 	free(weights_cpu);
-	free(biases_cpu);
 	free(cpu_output);	
 
 }
@@ -3235,7 +3226,7 @@ int main(int argc, char *argv[]) {
 	float EPS = 0.0000001;
 	float N_EPOCHS = 40;
 
-	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS);
+	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS, total_images);
 	
 
 	/* PERFORM TRAINING */
@@ -3266,7 +3257,7 @@ int main(int argc, char *argv[]) {
 			/* LOAD NEW BATCH */
 			printf("Loading Batch...\n");
 			// values go into trainer -> cur_batch -> [images_cpu|images_float_cpu|images|correct_classes_cpu|correct_classes]
-			load_new_batch(class_metadata, trainer -> cur_batch);
+			load_new_batch(trainer, class_metadata, trainer -> cur_batch);
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
@@ -3343,6 +3334,7 @@ int main(int argc, char *argv[]) {
 		// reset batch to start from beginning of dataset
 		trainer -> cur_batch -> cur_shard_id = -1;
 		trainer -> cur_batch -> cur_batch_in_shard = -1;
+		trainer -> cur_epoch += 1;
 
 	}
 

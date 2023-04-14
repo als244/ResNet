@@ -115,6 +115,7 @@ typedef struct {
 
 	float *post_expanded;
 	Cache_BatchNorm * norm_post_expanded;
+	float *post_expanded_norm_vals;
 
 	// if input dim of block != output dim of block, need to apply a transform 
 	// (otherwise null which implies identity of output of previous block)
@@ -201,7 +202,10 @@ typedef struct {
 	float cur_var_decay;
 	float eps;
 	int batch_size;
+	int total_images;
 	int n_epochs;
+	int cur_epoch;
+	int cur_dump_id;
 	float * loss_per_epoch;
 	float * accuracy_per_epoch;
 } Train_ResNet;
