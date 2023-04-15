@@ -19,6 +19,7 @@
 #define MAX_SHARED_MEMORY 48000
 #define MAX_SHARED_MEM_FLOATS 12000
 #define MAX_THREAD_PER_BLOCK_INCL_REG 512
+#define BATCH_NORM_DERIV_REDUCTION_THREADS 256
 
 
 
@@ -318,8 +319,10 @@ __global__ void doConvolution(const float * input, const float * weights, int sp
 
 // Independent over (input filter, input_x, input_y, sample)
 // could use shared memory over conv weights...
-// Launch with gridDim (spatial_dim, spatial_dim, max(1, input_filters / (MAX_THREAD_PER_BLOCK / batch_size))) and blockDim (batch_size, min(MAX_THREAD_PER_BLOCK / batch_size, input_filters))
+// Launch with gridDim (in_spatial_dim, in_spatial_dim, max(1, input_filters / (MAX_THREAD_PER_BLOCK / batch_size))) and blockDim (batch_size, min(MAX_THREAD_PER_BLOCK / batch_size, input_filters))
 // Can parallelize further with reductions, if want to optimize
+
+
 __global__ void convolutionDerivInput(const float * input, const float * weights, const float * out_deriv, int spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, 
 										bool toAdd, float * input_deriv){
 
@@ -372,8 +375,144 @@ __global__ void convolutionDerivInput(const float * input, const float * weights
 	else{
 		input_deriv[input_spatial_ind] = total_deriv;
 	}
-	
 }
+
+
+// // Launch with gridDim (input_filters, n_partials, batch_size) and blockDim (MAX_THREAD_PER_BLOCK_INCL_REG)
+
+// NOT WORKING! :(
+
+// __global__ void convolutionDerivInputPartialOptimized(const float * input, const float * weights, const float * out_deriv, int spatial_dim, int kern_dim, int in_filters, int out_filters, int total_weights, int stride, int batch_size, 
+// 												int n_load_output_filters_per_thread, int n_output_filters_per_partial, int n_partials, float * partial_input_deriv){
+
+
+// 	// for now sharing weights associates to a given input filter
+// 	__shared__ float shared_weights[MAX_SHARED_MEM_FLOATS];
+
+
+// 	// originally treat launch specs to bring in shared weights 
+
+// 	int in_filter_id = blockIdx.x;
+
+// 	// thread id represents (out_filter, kern_x, and kern_y)
+// 	// assuming the thread indicies represents [out_filter_0: (0, 0), (0, 1), ... (kern_dim - 1, kern_dim - 1), out_filter_1: (0, 0), (0, 1), ... (kern_dim - 1, kern_dim - 1)]
+// 	int thread_id = threadIdx.x;
+	
+
+// 	// blockIdx.y represents how many partial sums there will be
+// 	// each parital sum computes up derivs from (blockDim.x / (kern_dim * kern_dim)) output filters
+// 	int partial_id = blockIdx.y;
+	
+// 	// going from custom thread index scheme to semantic meaning
+// 	int kern_col = thread_id % kern_dim;
+// 	int kern_row = (thread_id / kern_dim) % kern_dim;
+
+// 	int orig_out_filters_per_partial = blockDim.x / (kern_dim * kern_dim);
+
+// 	int out_filter_start_id = (thread_id / (kern_dim * kern_dim)) + partial_id * n_output_filters_per_partial;
+
+// 	// getting the kern ind represented in the global weight matrix
+// 	int kern_ind = kern_dim * in_filters * kern_row + in_filters * kern_col + in_filter_id;
+
+// 	int kernel_size = (kern_dim * kern_dim * in_filters);
+// 	int weight_ind;
+
+// 	for (int i = 0; i < n_load_output_filters_per_thread; i++){
+// 		weight_ind = (out_filter_start_id + i * orig_out_filters_per_partial) * kernel_size + kern_ind;
+// 		// if there is actually a weight to store in shared
+// 		if (weight_ind < total_weights){
+// 			shared_weights[thread_id + i * orig_out_filters_per_partial * kern_dim * kern_dim] = weights[weight_ind];
+// 		}
+// 	}
+
+// 	__syncthreads();
+
+
+// 	// now treat threads to just do ordinary work using the shared weights (independent over samples in batch & spatial dim)
+	
+	
+// 	int start_out_filter = n_output_filters_per_partial * partial_id;
+
+// 	int out_spatial_dim = spatial_dim / stride;
+// 	int half_kernel_dim = kern_dim / 2;
+
+// 	int spatial_row, spatial_col, in_spatial_ind, out_spatial_row, out_spatial_col, out_spatial_ind, kern_row_ind, kern_col_ind, kern_shared_mem_ind;
+
+// 	float partial_deriv = 0;
+
+// 	int spatial_row_col_ind = thread_id;
+// 	int spatial_row_col_total = spatial_dim * spatial_dim;
+
+// 	int sample_ind = blockIdx.z;
+
+// 	while (spatial_row_col_ind < spatial_row_col_total){
+
+// 		spatial_col = spatial_row_col_ind % spatial_dim;
+// 		spatial_row = (spatial_row_col_ind / spatial_dim) % spatial_dim;
+
+// 		partial_deriv = 0;
+
+// 		for (int cur_out_filter_id = start_out_filter; cur_out_filter_id < start_out_filter + n_output_filters_per_partial && cur_out_filter_id < out_filters; cur_out_filter_id++){
+// 			for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim; row_offset++){
+// 				for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
+					
+// 					// compute output spatial value that used the input spatial value
+// 					out_spatial_row = spatial_row / stride + row_offset;
+// 					out_spatial_col = spatial_col / stride + col_offset;
+
+// 					// get kernel index used to generate out spatial value for corresponding input spatial value
+// 					kern_row_ind = spatial_row - out_spatial_row * stride + half_kernel_dim;
+// 					kern_col_ind = spatial_col - out_spatial_col * stride + half_kernel_dim;
+
+// 					if ((kern_row_ind < 0) || (kern_row_ind >= kern_dim) || (kern_col_ind < 0) || (kern_col_ind >= kern_dim) ||
+// 						(out_spatial_row < 0) || (out_spatial_row >= out_spatial_dim) || (out_spatial_col < 0) || (out_spatial_col >= out_spatial_dim)) {
+// 							continue;
+// 					}
+					
+// 					// index of output spatial val (iterate over samples in batch, then rows, then columns, then channels)
+// 					out_spatial_ind = out_spatial_dim * out_spatial_dim * out_filters * sample_ind + out_spatial_dim * out_filters * out_spatial_row + out_filters * out_spatial_col + cur_out_filter_id;
+
+// 					// getting the weight using custom indexing scheme from kernel launch spec / shared mem storage
+// 					kern_shared_mem_ind = (cur_out_filter_id % n_output_filters_per_partial) * (kern_dim * kern_dim) + kern_dim * kern_row_ind + kern_col_ind;
+
+// 					partial_deriv += shared_weights[kern_shared_mem_ind] * out_deriv[out_spatial_ind];
+					
+// 				}
+// 			}
+// 		}
+
+// 		in_spatial_ind = spatial_dim * spatial_dim * in_filters * sample_ind + spatial_dim * in_filters * spatial_row + in_filters * spatial_col + in_filter_id;
+
+// 		partial_input_deriv[n_partials * in_spatial_ind + partial_id] = partial_deriv;
+
+// 		// skip over all the other threads running in parallel working on other chunks of spatial/batch combos
+// 		spatial_row_col_ind += blockDim.x;
+// 	}
+// }
+
+
+// // Launch with Full Parallel: <<< ceil((float) input_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>>
+// __global__ void finalizeRecutionConvolutionInputDerivOptimized(int input_size, int n_partials, const float * partial_input_deriv, float * input_deriv, bool toAdd){
+
+// 	int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+// 	if (index >= input_size){
+// 		return;
+// 	}
+
+// 	float total_deriv = 0;
+// 	for (int k = 0; k < n_partials; k++){
+// 		total_deriv += partial_input_deriv[n_partials * index + k];
+// 	}
+
+// 	if (toAdd){
+// 		input_deriv[index] += total_deriv;
+// 	}
+// 	else{
+// 		input_deriv[index] = total_deriv;
+// 	}
+
+// }
 
 // FOR NOW KEEP NAIVE (UN-OPTIMIZED)...
 // not bothering with shared memory for now...
@@ -586,6 +725,151 @@ __global__ void doRecomputeBatchNormAndActivate(int size, const float * input, c
 // 	}
 // }
 
+
+__device__ void warpReduce(volatile float * shared_mem_data, int thread_id){
+	shared_mem_data[thread_id] += shared_mem_data[thread_id + 32];
+	shared_mem_data[thread_id] += shared_mem_data[thread_id + 16];
+	shared_mem_data[thread_id] += shared_mem_data[thread_id + 8];
+	shared_mem_data[thread_id] += shared_mem_data[thread_id + 4];
+	shared_mem_data[thread_id] += shared_mem_data[thread_id + 2];
+	shared_mem_data[thread_id] += shared_mem_data[thread_id + 1];
+}
+
+
+// computing partial sums for every stride'th element in list (e.g. partialSums for all index % filters == 0, index % filters == 1, etc.)
+// want to reduce over batch_size * spatial_dim * spatial_dim per filter
+// each block will get partialSum of portion of batch_size * spatial_dim * spatial_dim elements for given filter
+// thus there will be filters * ((batch_size * spatial_dim * spatial_dim) / BATCH_NORM_DERIV_REDUCTION_THREADS) blocks
+
+// LAUNCH SPEC: <<< filters * ceil(((batch_size * spatial_dim * spatial_dim) / BATCH_NORM_DERIV_REDUCTION_THREADS)), BATCH_NORM_DERIV_REDUCTION_THREADS >>>
+
+
+// partial sums has gridDim * stride entries, that further need to be reduced to stride entries for the full sum
+// each block will compute partial sum of 256 elements
+
+// NOT MEMORY COALESCED! Should change the order of arrays to have filter be the highest order, rather than lowest
+__global__ void batchNormDerivReduction(int size, const float * gammas, const float * betas, const float * input,
+														int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars, const float * activated_derivs,
+														float * global_partialDerivSum, float * global_partialDerivMultSum, float * global_partialDGamma, float * global_partialDBeta, float * normalized_temp_deriv){
+	
+	
+	__shared__ float partialDerivSum[BATCH_NORM_DERIV_REDUCTION_THREADS];
+	__shared__ float partialDerivMultSum[BATCH_NORM_DERIV_REDUCTION_THREADS];
+	__shared__ float partialDGamma[BATCH_NORM_DERIV_REDUCTION_THREADS];
+	__shared__ float partialDBeta[BATCH_NORM_DERIV_REDUCTION_THREADS];
+
+	unsigned int filter_id = blockIdx.x % filters;
+	unsigned int n_partials_per_filt = gridDim.x / filters;
+	unsigned int filter_partial_ind = blockIdx.x / filters;
+	unsigned int block_start = filter_id + filter_partial_ind * blockDim.x * filters;
+	unsigned int thread_id = threadIdx.x;
+	unsigned int index = block_start + thread_id * filters;
+	
+	if (index >= size){
+		return;
+	}
+
+	float gamma = gammas[filter_id];
+	float beta = betas[filter_id];
+	float mean = means[filter_id];
+	float var = vars[filter_id];
+
+	float activated_deriv = activated_derivs[index];
+	float normalized_temp_val = (input[index] - mean) / sqrtf(var + eps);
+	float normalized_temp_deriv_val = activated_deriv * gamma;
+	normalized_temp_deriv[index] = normalized_temp_deriv_val;
+
+	partialDerivSum[thread_id] = normalized_temp_deriv_val;
+	partialDerivMultSum[thread_id] = normalized_temp_deriv_val * normalized_temp_val;
+	partialDGamma[thread_id] = activated_deriv * normalized_temp_val;
+	partialDBeta[thread_id] = activated_deriv;
+
+	__syncthreads();
+
+	// now each block has 256 elements from the same filter loaded consecutively into shared memory.
+	// do reduction of these and save to the global partial memory to then finalized sum over partials
+
+	for (unsigned int stride = (blockDim.x/2); stride > 32; stride>>=1){
+		if (thread_id < stride){
+			partialDerivSum[thread_id] += partialDerivSum[thread_id + stride];
+			partialDerivMultSum[thread_id] += partialDerivMultSum[thread_id + stride];
+			partialDGamma[thread_id] += partialDGamma[thread_id + stride];
+			partialDBeta[thread_id] += partialDBeta[thread_id + stride];
+		}
+		__syncthreads();
+	}
+
+	// only 1 warp left so manually unrolling 
+	if (thread_id < 32){
+		warpReduce(partialDerivSum, thread_id);
+		warpReduce(partialDerivMultSum, thread_id);
+		warpReduce(partialDGamma, thread_id);
+		warpReduce(partialDBeta, thread_id);
+	}
+
+	int partial_ind_in_global = filter_id * n_partials_per_filt + filter_partial_ind;
+	if (thread_id == 0){
+		global_partialDerivSum[partial_ind_in_global] = partialDerivSum[0];
+		global_partialDerivMultSum[partial_ind_in_global] = partialDerivMultSum[0];
+		global_partialDGamma[partial_ind_in_global] = partialDGamma[0];
+		global_partialDBeta[partial_ind_in_global] = partialDBeta[0];
+	}
+}
+
+
+// LAUNCH WITH < filters, 1 >
+// still more room for reductions over partials...
+__global__ void finalizeReductionBatchNormDeriv(int filters, int n_partials_per_filt, float * global_partialDerivSum, float * global_partialDerivMultSum, float * global_partialDGamma, float * global_partialDBeta, 
+												 float * gamma_deriv, float * beta_deriv, float * deriv_sums, float * deriv_mult_sums){
+
+	int filter_id = blockIdx.x;
+
+	if (filter_id > filters){
+		return;
+	}
+
+	float dSum = 0;
+	float dMultSum = 0;
+	float dGamma = 0;
+	float dBeta = 0;
+
+	int filt_start_ind = filter_id * n_partials_per_filt;
+
+	for (int i = 0; i < n_partials_per_filt; i++){
+		dSum += global_partialDerivSum[filt_start_ind + i];
+		dMultSum += global_partialDerivMultSum[filt_start_ind + i];
+		dGamma += global_partialDGamma[filt_start_ind + i];
+		dBeta += global_partialDBeta[filt_start_ind + i];
+	}
+
+	gamma_deriv[filter_id] = dGamma;
+	beta_deriv[filter_id] = dBeta;
+	deriv_sums[filter_id] = dSum;
+	deriv_mult_sums[filter_id] = dMultSum;
+}
+
+
+// LAUNCH WITH < ceil(filters * batch_size * spatial_dim * spatial_dim / (MAX_THREAD_PER_BLOCK)), MAX_THREAD_PER_BLOCK >
+// fully parallel
+__global__ void computeBatchNormInputDerivFromReduction(int total_size, const float * input, int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars,
+									const float * normalized_temp_deriv, const float * deriv_sums, const float * deriv_mult_sums, float * input_deriv){
+
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= total_size){
+		return;
+	}
+	int filter_id = index % filters;
+	float mean = means[filter_id];
+	float var = vars[filter_id];
+	float deriv_sum = deriv_sums[filter_id];
+	float deriv_mult_sum = deriv_mult_sums[filter_id];
+	int n_samples = batch_size * spatial_dim * spatial_dim;
+
+	float normalized_temp_val = (input[index] - mean) / sqrtf(var + eps);
+	input_deriv[index] = (n_samples * normalized_temp_deriv[index] - deriv_sum - normalized_temp_val * deriv_mult_sum) / (n_samples * sqrtf(var + eps));
+
+}
+
 __global__ void activationAndBatchNormDeriv(const float * input, const float * gamma, const float * beta, 
 									int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars, const float * activated,
 									const float * out_layer_deriv, float * normalized_temp_deriv, float * gamma_deriv, float * beta_deriv, float * deriv_sums, float * deriv_mult_sums, float * input_deriv, bool to_activate_deriv){
@@ -637,29 +921,6 @@ __global__ void activationAndBatchNormDeriv(const float * input, const float * g
 	deriv_sums[filter_id] = deriv_sum;
 	deriv_mult_sums[filter_id] = deriv_mult_sum;
 }
-
-
-__global__ void batchNormInputDeriv(int total_size, const float * input, int spatial_dim, int filters, int batch_size, float eps, const float * means, const float * vars,
-									const float * normalized_temp_deriv, const float * deriv_sums, const float * deriv_mult_sums, float * input_deriv){
-
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index >= total_size){
-		return;
-	}
-	int filter_id = index % filters;
-	float mean = means[filter_id];
-	float var = vars[filter_id];
-	float deriv_sum = deriv_sums[filter_id];
-	float deriv_mult_sum = deriv_mult_sums[filter_id];
-	int n_samples = batch_size * spatial_dim * spatial_dim;
-
-	float normalized_temp_val = (input[index] - mean) / sqrtf(var + eps);
-	input_deriv[index] = (n_samples * normalized_temp_deriv[index] - deriv_sum - normalized_temp_val * deriv_mult_sum) / (n_samples * sqrtf(var + eps));
-
-
-}
-
-
 
 // assume grid launch of (SPATIAL_OUT_DIM, SPATIAL_OUT_DIM) and block dim of (FILTERS)
 // could parallelize over batches as well, but probably ok. 
@@ -1621,7 +1882,7 @@ void prepareAndDoConvolution(int in_spatial_dim, int kern_dim, int in_filters, i
 }
 
 
-void prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, bool toAdd,
+void prepareAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, bool toAdd,
 												float * input, float * weights, float * out_deriv,
 												float * input_deriv, float * weight_deriv, bool toComputeInputDeriv){
 	
@@ -1652,6 +1913,60 @@ void prepreAndDoConvolutionDeriv(int in_spatial_dim, int kern_dim, int in_filter
 	dim3 blockDimDerivWeights(block_dim);
 	convolutionDerivWeights <<< gridDimDerivWeights, blockDimDerivWeights >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv, is_block_dim_inp);
 }
+
+
+
+// NOT WORKING! :(
+
+// void prepareAndDoConvolutionDerivOptimized(int in_spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, bool toAdd,
+// 												float * input, float * weights, float * out_deriv,
+// 												float * input_deriv, float * weight_deriv, bool toComputeInputDeriv){
+	
+	
+
+// 	int output_filters_per_partial = min(out_filters, MAX_SHARED_MEM_FLOATS / (kern_dim * kern_dim));
+// 	int n_partials = ceil((float) out_filters / (float) output_filters_per_partial);
+// 	int n_load_output_filters_per_thread = max(1, output_filters_per_partial / MAX_THREAD_PER_BLOCK_INCL_REG);
+// 	int shared_mem_usage = output_filters_per_partial * kern_dim * kern_dim * sizeof(float);
+// 	int total_weights = out_filters * in_filters * kern_dim * kern_dim;
+	
+// 	int input_size = batch_size * in_filters * in_spatial_dim * in_spatial_dim;
+
+// 	dim3 gridDimDerivInput(in_filters, n_partials, batch_size);
+// 	dim3 blockDimDerivInput(MAX_THREAD_PER_BLOCK_INCL_REG);
+
+// 	dim3 gridDimTotalInputMax(ceil((float) (input_size) / (float) MAX_THREAD_PER_BLOCK));
+// 	dim3 blockDimTotalInputMax(MAX_THREAD_PER_BLOCK);
+	
+// 	// first layer conv doesn't take deriv w.r.t input;
+// 	if (toComputeInputDeriv){
+// 		float * partial_input_deriv;
+// 		cudaMalloc(&partial_input_deriv, input_size * n_partials * sizeof(float));
+
+// 		convolutionDerivInputPartial <<< gridDimDerivInput, blockDimDerivInput >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, total_weights, stride, batch_size, n_load_output_filters_per_thread, output_filters_per_partial, n_partials, partial_input_deriv);
+
+// 		finalizeRecutionConvolutionInputDeriv <<< gridDimTotalInputMax, blockDimTotalInputMax >>> (input_size, n_partials, partial_input_deriv, input_deriv, toAdd);
+
+// 		cudaFree(partial_input_deriv);
+// 	}
+
+// 	int block_dim, grid_dim;
+// 	bool is_block_dim_inp;
+// 	if (in_filters > MAX_THREAD_PER_BLOCK){
+// 		block_dim = out_filters;
+// 		grid_dim = in_filters;
+// 		is_block_dim_inp = false;
+// 	}
+// 	else{
+// 		block_dim = in_filters;
+// 		grid_dim = out_filters;
+// 		is_block_dim_inp = true;
+// 	}
+	
+// 	dim3 gridDimDerivWeights(kern_dim, kern_dim, grid_dim);
+// 	dim3 blockDimDerivWeights(block_dim);
+// 	convolutionDerivWeights <<< gridDimDerivWeights, blockDimDerivWeights >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv, is_block_dim_inp);
+// }
 
 
 void prepareAndDoBatchNormAndActivate(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, int batch_size, float eps, float * input, float * activated_out, bool to_activate){
@@ -1705,46 +2020,124 @@ void prepareAndDoRecomputeBNActivation(float * input, BatchNorm * batch_norm_par
 	doRecomputeBatchNormAndActivate<<< gridDimBatchNorm, blockDimBatchNorm >>> (total_size, input, gamma, beta, spatial_dim, filters, batch_size, eps, means_out, vars_out, out, to_activate);
 }
 
+// void prepareAndDoActivationAndBatchNormDerivOld(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, 
+// 																								int batch_size, float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv, bool to_activate_deriv){
+// 	int filters = batch_norm_params -> depth;
+// 	int spatial_dim = batch_norm_params -> spatial_dim;
+// 	float * gamma = batch_norm_params -> gamma;
+// 	float * beta = batch_norm_params -> beta;
+// 	float * means = batch_norm_cache -> means;
+// 	float * vars = batch_norm_cache -> vars;
+
+// 	float * normalized_temp_deriv;
+// 	cudaMalloc(&normalized_temp_deriv, batch_size * filters * spatial_dim * spatial_dim * sizeof(float));
+
+// 	float * deriv_sums;
+// 	cudaMalloc(&deriv_sums, filters * sizeof(float));
+
+// 	float * deriv_mult_sums;
+// 	cudaMalloc(&deriv_mult_sums, filters * sizeof(float));
+
+// 	float * gamma_deriv = batch_norm_param_derivs -> gamma;
+// 	float * beta_deriv = batch_norm_param_derivs -> beta;
+
+// 	int num_threads = min(MAX_THREAD_PER_BLOCK_INCL_REG, filters);
+// 	int num_blocks = 1;
+// 	if (filters > num_threads){
+// 		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
+// 	}
+
+// 	dim3 gridDimBatchNormDeriv(num_blocks);
+// 	dim3 blockDimBatchNormDeriv(num_threads);
+// 	activationAndBatchNormDeriv <<< gridDimBatchNormDeriv, blockDimBatchNormDeriv >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, deriv_sums, deriv_mult_sums, input_deriv, to_activate_deriv);
+
+// 	int total_size = batch_size * filters * spatial_dim * spatial_dim;
+// 	num_threads = MAX_THREAD_PER_BLOCK;
+// 	num_blocks = ceil((float) (total_size) / (float) MAX_THREAD_PER_BLOCK);
+
+// 	dim3 gridDimBatchNormInpDeriv(num_blocks);
+// 	dim3 blockDimBatchNormInpDeriv(num_threads);
+
+// 	batchNormInputDeriv <<< gridDimBatchNormInpDeriv, blockDimBatchNormInpDeriv >>> (total_size, input, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp_deriv, deriv_sums, deriv_mult_sums, input_deriv);
+
+// 	cudaFree(normalized_temp_deriv);
+// 	cudaFree(deriv_sums);
+// 	cudaFree(deriv_mult_sums);
+
+// }
+
+
 void prepareAndDoActivationAndBatchNormDeriv(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, 
 																								int batch_size, float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv, bool to_activate_deriv){
 	int filters = batch_norm_params -> depth;
 	int spatial_dim = batch_norm_params -> spatial_dim;
-	float * gamma = batch_norm_params -> gamma;
-	float * beta = batch_norm_params -> beta;
+	int total_size = batch_size * filters * spatial_dim * spatial_dim;
+
+	float * activation_deriv;
+	dim3 gridDimTotalSizeMax(ceil((float) total_size / (float) MAX_THREAD_PER_BLOCK));
+	dim3 blockDimTotalSizeMax(MAX_THREAD_PER_BLOCK);
+
+	if (to_activate_deriv){
+		cudaMalloc(&activation_deriv, total_size * sizeof(float));
+		doActivationDeriv <<< gridDimTotalSizeMax, blockDimTotalSizeMax >>> (total_size, activated, out_layer_deriv, activation_deriv);
+	}
+	else{
+		activation_deriv = out_layer_deriv;
+	}
+
+	float * gammas = batch_norm_params -> gamma;
+	float * betas = batch_norm_params -> beta;
 	float * means = batch_norm_cache -> means;
 	float * vars = batch_norm_cache -> vars;
 
 	float * normalized_temp_deriv;
 	cudaMalloc(&normalized_temp_deriv, batch_size * filters * spatial_dim * spatial_dim * sizeof(float));
 
+	
+
+	int n_partials_per_filt = ceil((float) (batch_size * spatial_dim * spatial_dim) / (float) BATCH_NORM_DERIV_REDUCTION_THREADS);
+	
+
+	float * global_partialDerivSum, *global_partialDerivMultSum, *global_partialDGamma, *global_partialDBeta;
+	cudaMalloc(&global_partialDerivSum, filters * n_partials_per_filt * sizeof(float));
+	cudaMalloc(&global_partialDerivMultSum, filters * n_partials_per_filt * sizeof(float));
+	cudaMalloc(&global_partialDGamma, filters * n_partials_per_filt * sizeof(float));
+	cudaMalloc(&global_partialDBeta, filters * n_partials_per_filt * sizeof(float));
+
+
+	dim3 gridDimBatchNormReduction(filters * n_partials_per_filt);
+	dim3 blockDimBatchNormReduction(BATCH_NORM_DERIV_REDUCTION_THREADS);
+
+	batchNormDerivReduction <<< gridDimBatchNormReduction, blockDimBatchNormReduction >>> (total_size, gammas, betas, input, spatial_dim, filters, batch_size, eps, means, vars, activation_deriv, 
+																							global_partialDerivSum, global_partialDerivMultSum, global_partialDGamma, global_partialDBeta, normalized_temp_deriv);
+
+	if (to_activate_deriv){
+		cudaFree(activation_deriv);
+	}
+
+
+	float * gamma_deriv = batch_norm_param_derivs -> gamma;
+	float * beta_deriv = batch_norm_param_derivs -> beta;
+	
 	float * deriv_sums;
 	cudaMalloc(&deriv_sums, filters * sizeof(float));
 
 	float * deriv_mult_sums;
 	cudaMalloc(&deriv_mult_sums, filters * sizeof(float));
 
-	float * gamma_deriv = batch_norm_param_derivs -> gamma;
-	float * beta_deriv = batch_norm_param_derivs -> beta;
 
-	int num_threads = min(MAX_THREAD_PER_BLOCK_INCL_REG, filters);
-	int num_blocks = 1;
-	if (filters > num_threads){
-		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
-	}
+	dim3 gridDimFinalizeBNReduction(filters);
+	dim3 blockDimFinalizeBNReduction(1);
 
-	dim3 gridDimBatchNormDeriv(num_blocks);
-	dim3 blockDimBatchNormDeriv(num_threads);
-	activationAndBatchNormDeriv <<< gridDimBatchNormDeriv, blockDimBatchNormDeriv >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, deriv_sums, deriv_mult_sums, input_deriv, to_activate_deriv);
+	finalizeReductionBatchNormDeriv <<< gridDimFinalizeBNReduction, blockDimFinalizeBNReduction >>> (filters, n_partials_per_filt, global_partialDerivSum, global_partialDerivMultSum, global_partialDGamma, global_partialDBeta,
+																										gamma_deriv, beta_deriv, deriv_sums, deriv_mult_sums);
+	cudaFree(global_partialDerivSum);
+	cudaFree(global_partialDerivMultSum);
+	cudaFree(global_partialDGamma);
+	cudaFree(global_partialDBeta);
 
-	int total_size = batch_size * filters * spatial_dim * spatial_dim;
-	num_threads = MAX_THREAD_PER_BLOCK;
-	num_blocks = ceil((float) (total_size) / (float) MAX_THREAD_PER_BLOCK);
-
-	dim3 gridDimBatchNormInpDeriv(num_blocks);
-	dim3 blockDimBatchNormInpDeriv(num_threads);
-
-	batchNormInputDeriv <<< gridDimBatchNormInpDeriv, blockDimBatchNormInpDeriv >>> (total_size, input, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp_deriv, deriv_sums, deriv_mult_sums, input_deriv);
-
+	computeBatchNormInputDerivFromReduction <<< gridDimTotalSizeMax, blockDimTotalSizeMax >>> (total_size, input, spatial_dim, filters, batch_size, eps, means, vars,
+																								normalized_temp_deriv, deriv_sums, deriv_mult_sums, input_deriv);
 	cudaFree(normalized_temp_deriv);
 	cudaFree(deriv_sums);
 	cudaFree(deriv_mult_sums);
@@ -2235,7 +2628,7 @@ void backwards_pass(Train_ResNet * trainer){
 			conv_input_deriv = conv_block_input_deriv;
 			conv_weight_deriv = cur_conv_block_param_derivs -> projection;
 
-			prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
+			prepareAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
 													conv_input_deriv, conv_weight_deriv, true);
 
@@ -2303,7 +2696,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 		prepareAndDoRecomputeBNActivation(conv_input, cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, prev_bn_activated, true);
 
-		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
+		prepareAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 														prev_bn_activated, conv_weight, conv_out_deriv,
 														conv_input_deriv, conv_weight_deriv, true);
 
@@ -2362,7 +2755,7 @@ void backwards_pass(Train_ResNet * trainer){
 
 		prepareAndDoRecomputeBNActivation(conv_input, cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, prev_bn_activated, true);
 
-		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
+		prepareAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 														prev_bn_activated, conv_weight, conv_out_deriv,
 														conv_input_deriv, conv_weight_deriv, true);
 
@@ -2412,7 +2805,7 @@ void backwards_pass(Train_ResNet * trainer){
 		conv_input_deriv = conv_block_input_deriv;
 		conv_weight_deriv = cur_conv_block_param_derivs -> depth_reduction;
 
-		prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, true,
+		prepareAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, true,
 													conv_input, conv_weight, conv_out_deriv,
 													conv_input_deriv, conv_weight_deriv, true);
 
@@ -2501,7 +2894,7 @@ void backwards_pass(Train_ResNet * trainer){
 	conv_input_deriv = NULL;
 	conv_weight_deriv = param_derivs -> init_conv_layer;
 
-	prepreAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
+	prepareAndDoConvolutionDeriv(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
 													conv_input_deriv, conv_weight_deriv, false);
 
@@ -3304,7 +3697,7 @@ int main(int argc, char *argv[]) {
 	// given when we generated shards...
 	int SHARD_N_IMAGES = 32768;
 
-	int BATCH_SIZE = 224;
+	int BATCH_SIZE = 128;
 	// dimensions of INPUT_DIM X INPUT_DIM x 3 color channels
 	int IMAGE_SIZE = INPUT_DIM * INPUT_DIM * 3;
 	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE, INPUT_DIM, SHARD_N_IMAGES);
@@ -3353,7 +3746,7 @@ int main(int argc, char *argv[]) {
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			printf("Status after loading batch: %s\n\n", cudaGetErrorString(status));
+			//printf("Status after loading batch: %s\n\n", cudaGetErrorString(status));
 			
 
 			/* DO FORWARD PROP */
@@ -3363,7 +3756,7 @@ int main(int argc, char *argv[]) {
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			printf("Status after forward pass: %s\n\n", cudaGetErrorString(status));
+			//printf("Status after forward pass: %s\n\n", cudaGetErrorString(status));
 			
 
 			/* RECORD LOSS AND ACCURACY */
@@ -3407,19 +3800,15 @@ int main(int argc, char *argv[]) {
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			printf("Status after backwards pass: %s\n\n", cudaGetErrorString(status));
+			//printf("Status after backwards pass: %s\n\n", cudaGetErrorString(status));
 
 			/* OPTIMIZE WEIGHTS */
-			printf("Applying Optimizer to Update Params...\n\n");
+			//printf("Applying Optimizer to Update Params...\n\n");
 			update_parameters(trainer);
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			printf("Status after updating params: %s\n\n", cudaGetErrorString(status));
-
-			if (iter == 4){
-				exit(1);
-			}
+			//printf("Status after updating params: %s\n\n", cudaGetErrorString(status));
 
 		}
 
