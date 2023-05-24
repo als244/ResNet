@@ -52,14 +52,11 @@ typedef struct {
 	// kernel weights for initial 1x1 step
 	float * depth_reduction;
 	// kernel weights for 3x3 step
-	float * bias_depth_reduction;
 	BatchNorm * norm_depth_reduction;
 	float * spatial;
-	float * bias_spatial;
 	BatchNorm * norm_spatial;
 	// kernel weights for output 1x1 step 
 	float * depth_expansion;
-	float * bias_depth_expansion;
 	BatchNorm * norm_expansion;
 	// need a projection is input dims != output dims
 	// contains pointers to convluations transforming input to output to add as residual
@@ -72,8 +69,6 @@ typedef struct {
 	// if depths are different than need a projection (if spatial also different then will do a 3x3, stride 2 kernel over block input)
 	// if depths different, but same spatial, then do a 1x1 convolution
 	float * projection;
-	// will be equal to number of output filters
-	float * bias_projection;
 	BatchNorm * norm_projection;
 	
 } ConvBlock;
@@ -83,7 +78,6 @@ typedef struct {
 typedef struct{
 	// initial 7x7 kernels
 	float * init_conv_layer;
-	float * bias_init_conv;
 	BatchNorm * norm_init_conv;
 	// contains pointers to collection of bottleneck block triples
 	ConvBlock ** conv_blocks;
@@ -111,12 +105,12 @@ typedef struct {
 	int expanded_depth;
 	// stride 2 for transition between stages
 	int stride;
-	// applying first layer in block to output of previous block and adding bias
+	// applying first layer in block to output of previous block
 	float *post_reduced;
 	Cache_BatchNorm * norm_post_reduced;
 	float *post_reduced_activated;
 
-	// applying second layer in block to depth_reduced and adding bias
+	// applying second layer in block to depth_reduced
 	float *post_spatial;
 	Cache_BatchNorm * norm_post_spatial;
 	float *post_spatial_activated;
@@ -141,7 +135,7 @@ typedef struct {
 
 
 typedef struct{
-	// after initial 7x7 kernel and adding bias
+	// after initial 7x7 kernel
 	float * init_conv_applied;
 	Cache_BatchNorm * norm_init_conv;
 	float * init_conv_activated;
