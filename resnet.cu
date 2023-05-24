@@ -1360,6 +1360,8 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 
 	trainer -> n_epochs = n_epochs;
 
+	trainer -> cur_dump_id = -1;
+
 	trainer -> loss_per_epoch = (float *) calloc(n_epochs, sizeof(float));
 	trainer -> accuracy_per_epoch = (float *) calloc(n_epochs, sizeof(float));
 
@@ -1404,7 +1406,7 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim, int shar
 
 // (if this takes too long, can do it in parallel with separate process on cpu)
 // ASSUMING shard_n_images % batch_size = 0
-void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
+void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Batch * batch_buffer){
 	
 	int batch_size = batch_buffer -> n_images;
 	int image_size = batch_buffer -> image_size;
@@ -1422,6 +1424,8 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	int cur_shard_id = batch_buffer -> cur_shard_id;
 	int cur_batch_in_shard = batch_buffer -> cur_batch_in_shard;
 	int shard_n_images = batch_buffer -> shard_n_images;
+
+	int cur_dump_id = trainer -> cur_dump_id;
 
 
 
@@ -1479,6 +1483,9 @@ void load_new_batch(Class_Metadata * class_metadata, Batch * batch_buffer){
 	// update cur batch for next iteration of loading
 	cur_batch_in_shard++;
 	batch_buffer -> cur_batch_in_shard = cur_batch_in_shard;
+
+	cur_dump_id++;
+	trainer -> cur_dump_id = cur_dump_id;
 
 }
 
@@ -2933,14 +2940,11 @@ void update_parameters(Train_ResNet * trainer){
 	/* DUMP THE STATE OF TRAINING PROCESS! */
 	// dumping every 10 batches, before update
 	// also dump when nan or inf occurs (data dumped to id=99999999)
-	int shard_n_images = trainer -> cur_batch -> shard_n_images;
-	int cur_shard_id = trainer -> cur_batch -> cur_shard_id;
-	// subtract 1 because incremented after loading...
-	int cur_batch_id = trainer -> cur_batch -> cur_batch_in_shard - 1;
-	int dump_id = (shard_n_images / batch_size) * cur_shard_id + cur_batch_id;
-	if (dump_id % 1000 == 0){
+	int cur_dump_id = trainer -> cur_dump_id;
+
+	if (cur_dump_id % 1000 == 0){
 		printf("DUMPING TRAINER...!\n\n");
-		dump_trainer(dump_id, trainer);
+		dump_trainer(cur_dump_id, trainer);
 	}
 	
 	for (int i = n_locations - 1; i >= 0; i--){
@@ -3316,7 +3320,7 @@ int main(int argc, char *argv[]) {
 			/* LOAD NEW BATCH */
 			printf("Loading Batch...\n");
 			// values go into trainer -> cur_batch -> [images_cpu|images_float_cpu|images|correct_classes_cpu|correct_classes]
-			load_new_batch(class_metadata, trainer -> cur_batch);
+			load_new_batch(trainer, class_metadata, trainer -> cur_batch);
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
