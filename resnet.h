@@ -206,8 +206,11 @@ typedef struct {
 	float eps;
 	int batch_size;
 	int n_epochs;
+	int cur_dump_id;
+	int cur_epoch;
 	float * loss_per_epoch;
 	float * accuracy_per_epoch;
+	int init_loaded;
 } Train_ResNet;
 
 

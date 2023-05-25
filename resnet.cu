@@ -1362,8 +1362,12 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 
 	trainer -> cur_dump_id = -1;
 
+	trainer -> cur_epoch = 0;
+
 	trainer -> loss_per_epoch = (float *) calloc(n_epochs, sizeof(float));
 	trainer -> accuracy_per_epoch = (float *) calloc(n_epochs, sizeof(float));
+
+	trainer -> init_loaded = 0;
 
 	return trainer;
 }
@@ -1427,6 +1431,8 @@ void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Bat
 
 	int cur_dump_id = trainer -> cur_dump_id;
 
+	int init_loaded = trainer -> init_loaded;
+
 
 
 	int start_img_num = cur_batch_in_shard * batch_size;
@@ -1435,11 +1441,13 @@ void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Bat
 
 	char * shard_images_filepath, * shard_labels_filepath;
 	// cur_shard_id = -1 implies first iteration
-	if ((cur_shard_id == -1) || (start_img_num >= shard_n_images)) {
+	if ((init_loaded) || (cur_shard_id == -1) || (start_img_num >= shard_n_images)) {
 
-		// update new shard id
-		cur_shard_id += 1;
-		batch_buffer -> cur_shard_id = cur_shard_id;
+		// update new shard id if first iter or passed the bounds
+		if (! init_loaded){
+			cur_shard_id += 1;
+			batch_buffer -> cur_shard_id = cur_shard_id;
+		}
 
 		// load new shard into RAM
 		print_ret = asprintf(&shard_images_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.images", cur_shard_id);
@@ -1454,9 +1462,14 @@ void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Bat
 		fclose(shard_labels_file);
 		free(shard_labels_filepath);
 
-		// reset cur batch in shard to 0
-		cur_batch_in_shard = 0;
-		batch_buffer -> cur_batch_in_shard = cur_batch_in_shard;
+		// reset cur batch in shard to 0 if first iter or passed the bounds
+		if (! init_loaded) {
+			cur_batch_in_shard = 0;
+			batch_buffer -> cur_batch_in_shard = cur_batch_in_shard;
+		}
+
+		// don't have to load special first batch from checkpoint anymore
+		trainer -> init_loaded = 0;
 	}
 
 	// load current batch
@@ -2859,6 +2872,79 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	}
 }
 
+void dump_trainer_meta(int dump_id, Train_ResNet * trainer){
+
+	char * filepath = NULL;
+	FILE * fp;
+	int print_ret;
+
+	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/trainer_metadata.txt", dump_id);
+	fp = fopen(filepath, "w");
+
+	// DUMP THE BATCH INFO
+	fprintf(fp, "%d\n", trainer -> batch_size);
+	fprintf(fp, "%d\n", trainer -> cur_batch -> image_size);
+	fprintf(fp, "%d\n", trainer -> cur_batch -> image_dim);
+	fprintf(fp, "%d\n", trainer -> cur_batch -> shard_n_images);
+
+
+	// NOW DO TRAINER METADATA
+	fprintf(fp, "%f\n", trainer -> learning_rate);
+	fprintf(fp, "%f\n", trainer -> weight_decay);
+	fprintf(fp, "%f\n", trainer -> base_mean_decay);
+	fprintf(fp, "%f\n", trainer -> base_var_decay);
+	fprintf(fp, "%f\n", trainer -> cur_mean_decay);
+	fprintf(fp, "%f\n", trainer -> cur_var_decay);
+	fprintf(fp, "%f\n", trainer -> eps);
+	fprintf(fp, "%d\n", trainer -> n_epochs);
+	fprintf(fp, "%d\n", trainer -> cur_dump_id);
+	fprintf(fp, "%d\n", trainer -> cur_epoch);
+
+	for (int i = 0; i < trainer -> cur_epoch; i++){
+		if (i == 0){
+			fprintf(fp, "%f", (trainer -> loss_per_epoch)[i]);
+		}
+		else{
+			fprintf(fp, ",%f", (trainer -> loss_per_epoch)[i]);
+		}
+	}
+	fprintf(fp, "\n");
+
+	for (int i = 0; i < trainer -> cur_epoch; i++){
+		if (i == 0){
+			fprintf(fp, "%f", (trainer -> accuracy_per_epoch)[i]);
+		}
+		else{
+			fprintf(fp, ",%f", (trainer -> accuracy_per_epoch)[i]);
+		}
+	}
+	fprintf(fp, "\n");
+
+	fclose(fp);
+}
+
+void dump_trainer_checkpoint(int dump_id, Train_ResNet * trainer){
+
+	char * filepath = NULL;
+	FILE * fp;
+	int print_ret;
+
+	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/trainer_checkpoint.txt", dump_id);
+	fp = fopen(filepath, "w");
+
+	// DUMP THE BATCH INFO
+	fprintf(fp, "%d\n", trainer -> cur_batch -> cur_shard_id);
+	fprintf(fp, "%d\n", trainer -> cur_batch -> cur_batch_in_shard);
+
+	// NOW DO TRAINER METADATA
+	fprintf(fp, "%f\n", trainer -> cur_mean_decay);
+	fprintf(fp, "%f\n", trainer -> cur_var_decay);
+	fprintf(fp, "%d\n", trainer -> cur_dump_id);
+	fprintf(fp, "%d\n", trainer -> cur_epoch);
+
+	fclose(fp);
+}
+
 void dump_trainer(int dump_id, Train_ResNet * trainer){
 
 	/* DUMP PARAMETERS */
@@ -2870,6 +2956,115 @@ void dump_trainer(int dump_id, Train_ResNet * trainer){
 	/* DUMP BACKPROP ACTIVATION DERIVS */
 	dump_activations(dump_id, trainer, trainer -> backprop_buffer -> activation_derivs, true);
 
+	/* DUMP TRAINER METADATA */
+	dump_trainer_meta(dump_id, trainer);
+
+	/* DUMP TRAINER CHECKPOINT */
+	dump_trainer_checkpoint(dump_id, trainer);
+
+}
+
+/* LOADING MODEL / ALLOCATING MEMORY FOR TRAINER */
+
+// loading from a checkpoint that was dumped
+// ASSUME EVERYTHING IS THE SAME AS IN THIS FILE EXCEPT: cur_shard_id, cur_batch_in_shard, cur_mean_decay, cur_var_decay, cur_dump_id, cur_epoch
+void overwrite_trainer_hyperparams(Train_ResNet * trainer, int dump_id){
+
+	// open the metadata file with hyper params and location of training sequence
+	char * filepath = NULL;
+	FILE * fp;
+	int print_ret;
+
+	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/trainer_checkpoint.txt", dump_id);
+	fp = fopen(filepath, "r");
+
+	// read the metadata file
+	char * line;
+	size_t len = 0;
+	ssize_t n_read;
+
+	// ASSUME THAT THE ORDERING OF LINES IS FIXED ACCORING TO "dump_trainer_checkpoint"
+
+	// LOAD THE BATCH INFO
+	n_read = getline(&line, &len, fp);
+	trainer -> cur_batch -> cur_shard_id = atoi(line);
+	n_read = getline(&line, &len, fp);
+	trainer -> cur_batch -> cur_batch_in_shard = atoi(line);
+
+	// LOAD OPTIMIZATION INFO
+	n_read = getline(&line, &len, fp);
+	trainer -> cur_mean_decay = atof(line);
+	n_read = getline(&line, &len, fp);
+	trainer -> cur_var_decay = atof(line);
+	
+	// LOAD SEQUENCE INFO
+	n_read = getline(&line, &len, fp);
+	trainer -> cur_dump_id = atoi(line);
+	n_read = getline(&line, &len, fp);
+	trainer -> cur_epoch = atoi(line);
+
+	trainer -> init_loaded = 1;
+
+	free(line);
+	fclose(fp);
+}
+
+
+// LOADING THE MODEL PARAMS AND OPTIMIZATION STATES FROM CHECKPOINT
+void overwrite_model_params(Train_ResNet * trainer, int dump_id){
+
+	Params * model_params = trainer -> model -> params;
+	float ** model_params_locations = model_params -> locations;
+	int * param_sizes = model_params -> sizes;
+	int n_locations = model_params -> n_locations;
+	
+	// locations of optimization states
+	Params * prev_grad_means = trainer -> backprop_buffer -> prev_means;
+	float ** prev_grad_means_locations = prev_grad_means -> locations;
+	Params * prev_grad_vars = trainer -> backprop_buffer -> prev_vars;
+	float ** prev_grad_vars_locations = prev_grad_vars -> locations;
+
+	int param_size;
+	float *model_location, * mean_location, * var_location;
+
+	float * cpu_param_buff;
+	FILE * fp;
+
+	char * model_params_filepath;
+	char * means_filepath;
+	char * vars_filepath;
+
+	int n_read, print_ret;
+	for (int i = n_locations - 1; i >= 0; i--){
+		param_size = param_sizes[i];
+		cpu_param_buff = (float *) malloc(param_size * sizeof(float));
+
+		print_ret = asprintf(&model_params_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/model_params/%03d.buffer", dump_id, i);
+		fp = fopen(model_params_filepath, "rb");
+		n_read = fread(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
+		model_location = model_params_locations[i];
+		cudaMemcpy(model_location, cpu_param_buff, param_size * sizeof(float), cudaMemcpyHostToDevice);
+		fclose(fp);
+		free(model_params_filepath);
+
+		print_ret = asprintf(&means_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/means/%03d.buffer", dump_id, i);
+		fp = fopen(means_filepath, "rb");
+		n_read = fread(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
+		mean_location = prev_grad_means_locations[i];
+		cudaMemcpy(mean_location, cpu_param_buff, param_size * sizeof(float), cudaMemcpyDeviceToHost);
+		fclose(fp);
+		free(means_filepath);
+
+		print_ret = asprintf(&vars_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/vars/%03d.buffer", dump_id, i);
+		fp = fopen(vars_filepath, "wb");
+		n_read = fread(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
+		var_location = prev_grad_vars_locations[i];
+		cudaMemcpy(var_location, cpu_param_buff, param_size * sizeof(float), cudaMemcpyHostToDevice);
+		fclose(fp);
+		free(vars_filepath);
+
+		free(cpu_param_buff);
+	}
 }
 
 
@@ -3267,7 +3462,6 @@ int main(int argc, char *argv[]) {
 	// INITIALIZING MODEL
 	ResNet * model = init_resnet(dims, &gen);
 
-
 	// INITIALIZING TRAINING
 
 	// Batch Structure (will be modified every iteration of every epoch)
@@ -3289,8 +3483,17 @@ int main(int argc, char *argv[]) {
 	float EPS = 0.0000001;
 	float N_EPOCHS = 40;
 
+
 	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS);
+
+	// OVERRIDE IF LOADING WEIGHTS
+	int LOAD_FROM_DUMP_ID = -1;
+	if (LOAD_FROM_DUMP_ID != -1){
+		overwrite_trainer_hyperparams(trainer, LOAD_FROM_DUMP_ID);
+		overwrite_model_params(trainer, LOAD_FROM_DUMP_ID);
+	}
 	
+
 
 	/* PERFORM TRAINING */
 
@@ -3310,10 +3513,14 @@ int main(int argc, char *argv[]) {
 	char * LOSS_FILENAME = (char *) "/mnt/storage/data/vision/imagenet/training_dumps/avg_loss_log.txt";
 	FILE * loss_file = fopen(LOSS_FILENAME, "w");
 
-	for (int epoch = 0; epoch < N_EPOCHS; epoch++){
+	// if this was loaded from checkpoint
+	int cur_epoch = trainer -> cur_epoch;
+	int cur_iter_in_epoch = (trainer -> cur_dump_id + 1) % iterations_per_epoch;
+
+	for (int epoch = cur_epoch; epoch < N_EPOCHS; epoch++){
 		epoch_loss = 0;
 		epoch_n_wrong = 0;
-		for (int iter = 0; iter < iterations_per_epoch; iter++){
+		for (int iter = cur_iter_in_epoch; iter < iterations_per_epoch; iter++){
 
 			printf("************\n");
 
@@ -3397,6 +3604,8 @@ int main(int argc, char *argv[]) {
 		// reset batch to start from beginning of dataset
 		trainer -> cur_batch -> cur_shard_id = -1;
 		trainer -> cur_batch -> cur_batch_in_shard = -1;
+
+		trainer -> cur_epoch += 1;
 
 	}
 
