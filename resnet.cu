@@ -833,12 +833,13 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	float old_model_param = model_params[i];
 	model_params[i] = model_params[i] - (learning_rate * (mean_adj / (sqrtf(var_adj) + eps)) + weight_decay * old_model_param);
 	if (isnan(model_params[i])){
-		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value\n", loc_ind, i);
+		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value of %f\n", loc_ind, i, old_model_param);
 		model_params[i] = old_model_param;
+		printf("Var: %f, Var Decay: %f, Var Adj: %f, Sqrt of Var Adj: %f\n\n", vars[i], cur_var_decay, var_adj, sqrtf(var_adj));
 		return;
 	}
 	if (isinf(model_params[i])){
-		printf("ERROR: for Parameter at location: %d\nto INF at index: %d...resetting to prev value\n", loc_ind, i);
+		printf("ERROR: for Parameter at location: %d\nto INF at index: %d...resetting to prev value of %f\n", loc_ind, i, old_model_param);
 		model_params[i] = old_model_param;
 		return;
 	}
@@ -1354,8 +1355,10 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 	trainer -> weight_decay = weight_decay;
 	trainer -> base_mean_decay = mean_decay;
 	trainer -> base_var_decay = var_decay;
+	
 	trainer -> cur_mean_decay = 1;
 	trainer -> cur_var_decay = 1;
+	
 	trainer -> eps = eps;
 
 	trainer -> n_epochs = n_epochs;
@@ -1401,6 +1404,7 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim, int shar
 
 	batch -> cur_shard_id = -1;
 	batch -> cur_batch_in_shard = -1;
+	
 	batch -> shard_n_images = shard_n_images;
 	batch -> full_shard_images = (float *) malloc((size_t) shard_n_images * (size_t) image_size * sizeof(float));
 	batch -> full_shard_correct_classes = (int *) malloc(shard_n_images * sizeof(int));
@@ -3024,7 +3028,7 @@ void overwrite_model_params(Train_ResNet * trainer, int dump_id){
 	Params * prev_grad_vars = trainer -> backprop_buffer -> prev_vars;
 	float ** prev_grad_vars_locations = prev_grad_vars -> locations;
 
-	int param_size;
+	size_t param_size;
 	float *model_location, * mean_location, * var_location;
 
 	float * cpu_param_buff;
@@ -3051,12 +3055,12 @@ void overwrite_model_params(Train_ResNet * trainer, int dump_id){
 		fp = fopen(means_filepath, "rb");
 		n_read = fread(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		mean_location = prev_grad_means_locations[i];
-		cudaMemcpy(mean_location, cpu_param_buff, param_size * sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(mean_location, cpu_param_buff, param_size * sizeof(float), cudaMemcpyHostToDevice);
 		fclose(fp);
 		free(means_filepath);
 
 		print_ret = asprintf(&vars_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/vars/%03d.buffer", dump_id, i);
-		fp = fopen(vars_filepath, "wb");
+		fp = fopen(vars_filepath, "rb");
 		n_read = fread(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		var_location = prev_grad_vars_locations[i];
 		cudaMemcpy(var_location, cpu_param_buff, param_size * sizeof(float), cudaMemcpyHostToDevice);
@@ -3488,12 +3492,11 @@ int main(int argc, char *argv[]) {
 
 	// OVERRIDE IF LOADING WEIGHTS
 	int LOAD_FROM_DUMP_ID = -1;
+	
 	if (LOAD_FROM_DUMP_ID != -1){
 		overwrite_trainer_hyperparams(trainer, LOAD_FROM_DUMP_ID);
 		overwrite_model_params(trainer, LOAD_FROM_DUMP_ID);
 	}
-	
-
 
 	/* PERFORM TRAINING */
 
