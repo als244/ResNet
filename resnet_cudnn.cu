@@ -632,7 +632,7 @@ __global__ void filterAvgPoolDeriv(const float * pooled_deriv, int filters, int 
 	}
 }
 
-__global__ void doActivation(int size, const float * input, float * output){
+__global__ void doActivation(int size, float * input, float * output){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
 		return;
@@ -640,7 +640,8 @@ __global__ void doActivation(int size, const float * input, float * output){
 	output[i] = fmaxf(0, input[i]);
 }
 
-__global__ void doActivationDeriv(int size, const float *input, const float * upstream_deriv, float * output){
+
+__global__ void doActivationDeriv(int size, float *input, float * upstream_deriv, float * output){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
 		return;
@@ -1055,7 +1056,7 @@ Cache_BatchNorm * init_cache_batchnorm(int input_size, int feature_size){
 	cache_batchnorm -> input_size = input_size;
 	cache_batchnorm -> feature_size = feature_size;
 
-	float * means, *inv_vars
+	float * means, *inv_vars;
 	cudaMalloc(&means, feature_size * sizeof(float));
 	cudaMalloc(&inv_vars, feature_size * sizeof(float));
 
@@ -1483,7 +1484,7 @@ void prepareAndDoConvolutionScratch(int in_spatial_dim, int kern_dim, int in_fil
 void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int kern_dim, int in_filters, int out_filters,  int stride, int batch_size, 
 																float * input, float * weights, float * output){
 
-	cudnnTensorDescription_t input_descriptor;
+	cudnnTensorDescriptor_t input_descriptor;
 	cudnnCreateTensorDescriptor(&input_descriptor);
 	cudnnSetTensor4dDescriptor(input_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, in_filters, in_spatial_dim, in_spatial_dim);
 
@@ -1505,13 +1506,13 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	// cudnnGetConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convolution_algorithm);
 
 	int returned_cnt;
-	cudnnConvolutionFwdAlgoPerf_t * top_algo = malloc(sizeof(cudnnConvolutionFwdAlgoPerf_t));
+	cudnnConvolutionFwdAlgoPerf_t * top_algo = (cudnnConvolutionFwdAlgoPerf_t *) malloc(sizeof(cudnnConvolutionFwdAlgoPerf_t));
 	cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
 	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
 	free(top_algo);
 
 	size_t workspace_bytes = 0;
-	cudnnGetConvolutionForwardWorkspaceSize(cudnn, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
+	cudnnGetConvolutionForwardWorkspaceSize(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
 
 	void * workspace;
 	cudaMalloc(&workspace, workspace_bytes);
@@ -1523,7 +1524,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	cudnnDestroyTensorDescriptor(input_descriptor);
 	cudnnDestroyTensorDescriptor(output_descriptor);
 	cudnnDestroyFilterDescriptor(kernel_descriptor);
-	cudnnDestoryConvolutionDescriptor(convolution_descriptor);
+	cudnnDestroyConvolutionDescriptor(convolution_descriptor);
 }
 
 void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int kern_dim, int in_filters, int out_filters, int stride, int batch_size, bool toAdd,
@@ -1533,7 +1534,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 	int out_spatial_dim = in_spatial_dim / stride;
 
 
-	cudnnTensorDescription_t input_descriptor;
+	cudnnTensorDescriptor_t input_descriptor;
 	cudnnCreateTensorDescriptor(&input_descriptor);
 	cudnnSetTensor4dDescriptor(input_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, in_filters, in_spatial_dim, in_spatial_dim);
 
@@ -1558,7 +1559,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 	// Compute deriv w.r.t input data
 	if (toComputeInputDeriv){
 
-		cudnnConvolutionBwdDataAlgoPerf_t * top_data_algo = malloc(sizeof(cudnnConvolutionBwdDataAlgoPerf_t));
+		cudnnConvolutionBwdDataAlgoPerf_t * top_data_algo = (cudnnConvolutionBwdDataAlgoPerf_t *) malloc(sizeof(cudnnConvolutionBwdDataAlgoPerf_t));
 		cudnnGetConvolutionBackwardDataAlgorithm_v7(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, 1, &returned_cnt, top_data_algo);
 		cudnnConvolutionBwdDataAlgo_t convolution_data_algorithm = top_data_algo[0].algo;
 		free(top_data_algo);
@@ -1577,7 +1578,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 
 	// Compute deriv w.r.t filter weights
-	cudnnConvolutionBwdFilterAlgoPerf_t * top_filter_algo = malloc(sizeof(cudnnConvolutionBwdFilterAlgoPerf_t));
+	cudnnConvolutionBwdFilterAlgoPerf_t * top_filter_algo = (cudnnConvolutionBwdFilterAlgoPerf_t *) malloc(sizeof(cudnnConvolutionBwdFilterAlgoPerf_t));
 	cudnnGetConvolutionBackwardFilterAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, 1, &returned_cnt, top_filter_algo);
 	cudnnConvolutionBwdFilterAlgo_t convolution_filter_algorithm = top_filter_algo[0].algo;
 	free(top_filter_algo);
@@ -1594,7 +1595,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 	cudnnDestroyTensorDescriptor(input_descriptor);
 	cudnnDestroyTensorDescriptor(output_descriptor);
 	cudnnDestroyFilterDescriptor(kernel_descriptor);
-	cudnnDestoryConvolutionDescriptor(convolution_descriptor);
+	cudnnDestroyConvolutionDescriptor(convolution_descriptor);
 }
 
 
@@ -1630,7 +1631,7 @@ void prepreAndDoConvolutionDerivScratch(int in_spatial_dim, int kern_dim, int in
 	convolutionDerivWeights <<< gridDimDerivWeights, blockDimDerivWeights >>> (input, weights, out_deriv, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, weight_deriv, is_block_dim_inp);
 }
 
-void prepareAndDoBatchNorm(Train_ResNet * trainer, BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, int batch_size, float eps, float * input, float * output){
+void prepareAndDoBatchNormAndActivate(Train_ResNet * trainer, BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, int batch_size, float eps, float * input, float * output, bool to_activate){
 	// reading values from batch norm params
 	int filters = batch_norm_params -> depth;
 	int spatial_dim = batch_norm_params -> spatial_dim;
@@ -1641,25 +1642,36 @@ void prepareAndDoBatchNorm(Train_ResNet * trainer, BatchNorm * batch_norm_params
 	float * means_out = batch_norm_cache -> means;
 	float * inv_vars_out = batch_norm_cache -> inv_var;
 
-	const float alpha = 1, beta = 0;
+	const float alpha_dummy = 1, beta_dummy = 0;
 
-	cudnnTensorDescription_t input_descriptor;
+	cudnnTensorDescriptor_t input_descriptor;
 	cudnnCreateTensorDescriptor(&input_descriptor);
-	cudnnSetTensor4dDescriptor(input_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, in_filters, in_spatial_dim, in_spatial_dim);
+	cudnnSetTensor4dDescriptor(input_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, filters, spatial_dim, spatial_dim);
 
-	cudnnTensorDescription_t bn_descriptor;
+	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
-	cudnnDeriveBNTensorDescriptor(bn_descriptor, input_descriptor, BATCHNORM_MODE_SPATIAL);
+	cudnnDeriveBNTensorDescriptor(bn_descriptor, input_descriptor, CUDNN_BATCHNORM_MODE_SPATIAL);
 
-	cudnnBatchNormalizationForwardTraining(trainer -> cudnnHandle, BATCHNORM_MODE_SPATIAL, &alpha, &beta, input_descriptor, input, input_descriptor, output, bn_descriptor, gamma, beta, 1, NULL, NULL, trainer -> eps, means_out, inv_vars_out);
+	cudnnBatchNormalizationForwardTraining(trainer -> cudnnHandle, CUDNN_BATCHNORM_MODE_SPATIAL, &alpha_dummy, &beta_dummy, input_descriptor, input, input_descriptor, output, bn_descriptor, gamma, beta, 1, NULL, NULL, trainer -> eps, means_out, inv_vars_out);
 
 	cudnnDestroyTensorDescriptor(input_descriptor);
 	cudnnDestroyTensorDescriptor(bn_descriptor);
 
+	if (to_activate){
+
+		size_t bn_output_size = batch_size * filters * spatial_dim * spatial_dim;
+
+		dim3 gridDimBN(ceil((float) (bn_output_size) / MAX_THREAD_PER_BLOCK));
+		dim3 blockDimBN(MAX_THREAD_PER_BLOCK);
+
+		doActivation <<< gridDimBN, blockDimBN >>> (bn_output_size, output, output);
+
+	}
+
 }
 
-void prepareAndDoBatchNormDeriv(Train_ResNet * trainer, BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
+void prepareAndDoActivationAndBatchNormDeriv(Train_ResNet * trainer, BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
 																								int batch_size, float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv, bool to_activate_deriv){
 	int filters = batch_norm_params -> depth;
 	int spatial_dim = batch_norm_params -> spatial_dim;
@@ -1672,6 +1684,16 @@ void prepareAndDoBatchNormDeriv(Train_ResNet * trainer, BatchNorm * batch_norm_p
 	float * beta_deriv = batch_norm_param_derivs -> beta;
 
 	const float alpha_data = 1, beta_data = 0, alpha_param = 1, beta_param = 0;
+
+
+	if (to_activate_deriv){
+		size_t bn_output_size = batch_size * filters * spatial_dim * spatial_dim;
+
+		dim3 gridDimBN(ceil((float) (bn_output_size) / MAX_THREAD_PER_BLOCK));
+		dim3 blockDimBN(MAX_THREAD_PER_BLOCK);
+
+		doActivationDeriv <<< gridDimBN, blockDimBN >>> (bn_output_size, activated, out_layer_deriv, out_layer_deriv);
+	}
 
 	cudnnTensorDescription_t layer_descriptor;
 	cudnnCreateTensorDescriptor(&layer_descriptor);
@@ -1690,32 +1712,30 @@ void prepareAndDoBatchNormDeriv(Train_ResNet * trainer, BatchNorm * batch_norm_p
 	cudnnDestroyTensorDescriptor(bn_descriptor);
 }
 
-void prepareAndDoActivationAndBatchNormDerivScratch(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
-																								int batch_size, float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv, bool to_activate_deriv){
-	int filters = batch_norm_params -> depth;
-	int spatial_dim = batch_norm_params -> spatial_dim;
-	float * gamma = batch_norm_params -> gamma;
-	float * beta = batch_norm_params -> beta;
-	float * means = batch_norm_cache -> means;
-	float * vars = batch_norm_cache -> vars;
-	float * normalized_temp = batch_norm_cache -> normalized_temp;
+// void prepareAndDoActivationAndBatchNormDerivScratch(BatchNorm * batch_norm_params, Cache_BatchNorm * batch_norm_cache, BatchNorm * batch_norm_param_derivs, Cache_BatchNorm * batch_norm_cache_derivs, 
+// 																								int batch_size, float eps, float * input, float * activated, float * out_layer_deriv, float * input_deriv, bool to_activate_deriv){
+// 	int filters = batch_norm_params -> depth;
+// 	int spatial_dim = batch_norm_params -> spatial_dim;
+// 	float * gamma = batch_norm_params -> gamma;
+// 	float * beta = batch_norm_params -> beta;
+// 	float * means = batch_norm_cache -> means;
+// 	float * vars = batch_norm_cache -> vars;
+// 	float * normalized_temp = batch_norm_cache -> normalized_temp;
 
-	float * normalized_temp_deriv = batch_norm_cache_derivs -> normalized_temp;
-	float * gamma_deriv = batch_norm_param_derivs -> gamma;
-	float * beta_deriv = batch_norm_param_derivs -> beta;
+// 	float * normalized_temp_deriv = batch_norm_cache_derivs -> normalized_temp;
+// 	float * gamma_deriv = batch_norm_param_derivs -> gamma;
+// 	float * beta_deriv = batch_norm_param_derivs -> beta;
 
-	int num_threads = min(MAX_THREAD_PER_BLOCK_INCL_REG, filters);
-	int num_blocks = 1;
-	if (filters > num_threads){
-		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
-	}
+// 	int num_threads = min(MAX_THREAD_PER_BLOCK_INCL_REG, filters);
+// 	int num_blocks = 1;
+// 	if (filters > num_threads){
+// 		num_blocks = ceil((float) filters / (float) MAX_THREAD_PER_BLOCK_INCL_REG);
+// 	}
 
-	dim3 gridDimBatchNormDeriv(num_blocks);
-	dim3 blockDimBatchNormDeriv(num_threads);
-	activationAndBatchNormDeriv <<< gridDimBatchNormDeriv, blockDimBatchNormDeriv >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv, to_activate_deriv);
-
-
-}
+// 	dim3 gridDimBatchNormDeriv(num_blocks);
+// 	dim3 blockDimBatchNormDeriv(num_threads);
+// 	activationAndBatchNormDeriv <<< gridDimBatchNormDeriv, blockDimBatchNormDeriv >>> (input, gamma, beta, spatial_dim, filters, batch_size, eps, means, vars, normalized_temp, activated, out_layer_deriv, normalized_temp_deriv, gamma_deriv, beta_deriv, input_deriv, to_activate_deriv);
+// }
 
 void prepareAndDoMatMulLeftTranspose(const float * left_orig, const float * right, int left_orig_rows, int left_orig_cols, int right_rows, int right_cols, float * out){
 	float * temp_left;
@@ -1782,7 +1802,7 @@ void forward_pass(Train_ResNet * trainer){
 	int init_stride = dims -> init_conv_stride;
 	int init_out_spatial_dim = init_spatial_dim / init_stride;
 
-	prepareAndDoConvolution(init_spatial_dim, init_kernel_dim, init_in_filters, init_out_filters, init_stride, batch_size, input, first_conv, first_conv_output);
+	prepareAndDoConvolution(trainer, init_spatial_dim, init_kernel_dim, init_in_filters, init_out_filters, init_stride, batch_size, input, first_conv, first_conv_output);
 
 	int print_size = 10;
 	printDeviceData("INIT CONV APPLIED", first_conv_output, print_size);
@@ -1792,7 +1812,7 @@ void forward_pass(Train_ResNet * trainer){
 	Cache_BatchNorm * norm_init_conv_cache = trainer -> forward_buffer -> activations -> norm_init_conv;
 	float * init_activated = trainer -> forward_buffer -> activations -> init_conv_activated;
 
-	prepareAndDoBatchNormAndActivate(norm_init_conv_params, norm_init_conv_cache, batch_size, eps, first_conv_output, init_activated, true);
+	prepareAndDoBatchNormAndActivate(trainer, norm_init_conv_params, norm_init_conv_cache, batch_size, eps, first_conv_output, init_activated, true);
 
 	printDeviceData("INIT CONV ACTIVATED", init_activated, print_size);
 
@@ -1840,7 +1860,7 @@ void forward_pass(Train_ResNet * trainer){
 		conv_weights = cur_conv_block_params -> depth_reduction;
 		conv_output = cur_conv_block_activation -> post_reduced;
 
-		prepareAndDoConvolution(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_output);
+		prepareAndDoConvolution(trainer, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_output);
 
 		printDeviceData("REDUCED CONV APPLIED", conv_output, print_size);
 
@@ -1849,7 +1869,7 @@ void forward_pass(Train_ResNet * trainer){
 		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_reduced;
 		norm_output = cur_conv_block_activation -> post_reduced_activated;
 
-		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, true);
+		prepareAndDoBatchNormAndActivate(trainer, cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, true);
 
 		printDeviceData("REDUCED CONV NORM & ACTIVATED", norm_output, print_size);
 
@@ -1868,7 +1888,7 @@ void forward_pass(Train_ResNet * trainer){
 		conv_weights = cur_conv_block_params -> spatial;;
 		conv_output = cur_conv_block_activation -> post_spatial;
 
-		prepareAndDoConvolution(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_output);
+		prepareAndDoConvolution(trainer, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_output);
 
 		printDeviceData("SPATIAL CONV APPLIED", conv_output, print_size);
 
@@ -1877,7 +1897,7 @@ void forward_pass(Train_ResNet * trainer){
 		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_spatial;
 		norm_output = cur_conv_block_activation -> post_spatial_activated;
 
-		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, true);
+		prepareAndDoBatchNormAndActivate(trainer, cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, true);
 
 		printDeviceData("SPATIAL CONV NORM & ACTIVATED", norm_output, print_size);
 
@@ -1895,7 +1915,7 @@ void forward_pass(Train_ResNet * trainer){
 		conv_weights = cur_conv_block_params -> depth_expansion;
 		conv_output = cur_conv_block_activation -> post_expanded;
 
-		prepareAndDoConvolution(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_output);
+		prepareAndDoConvolution(trainer, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_input, conv_weights, conv_output);
 
 		printDeviceData("EXPANDED CONV APPLIED", conv_output, print_size);
 
@@ -1905,7 +1925,7 @@ void forward_pass(Train_ResNet * trainer){
 		norm_output = cur_conv_block_activation -> post_expanded_norm_vals;
 
 		// do not activate because first need to add to (projection) residual
-		prepareAndDoBatchNormAndActivate(cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, false);
+		prepareAndDoBatchNormAndActivate(trainer, cur_batch_norm_params, cur_batch_norm_cache, batch_size, eps, norm_input, norm_output, false);
 
 		printDeviceData("EXPANDED NORM & ACTIVATED", norm_output, print_size);
 
@@ -1936,9 +1956,9 @@ void forward_pass(Train_ResNet * trainer){
 		if (projection_weights){
 			// allocated device memory to store output
 			transformed_residual = cur_conv_block_activation -> transformed_residual;
-			prepareAndDoConvolution(in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_block_input, projection_weights, transformed_residual);
+			prepareAndDoConvolution(trainer, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, conv_block_input, projection_weights, transformed_residual);
 			post_projection_norm_vals = cur_conv_block_activation -> post_projection_norm_vals;
-			prepareAndDoBatchNormAndActivate(cur_conv_block_params -> norm_projection, cur_conv_block_activation -> norm_post_projection, batch_size, eps, transformed_residual, post_projection_norm_vals, false);
+			prepareAndDoBatchNormAndActivate(trainer, cur_conv_block_params -> norm_projection, cur_conv_block_activation -> norm_post_projection, batch_size, eps, transformed_residual, post_projection_norm_vals, false);
 		}
 		else{
 			// would've been null, so renaming for semantic clarity
@@ -2197,7 +2217,7 @@ void backwards_pass(Train_ResNet * trainer){
 			// activated output of batch norm layer from forward pass
 			bn_activated = cur_conv_block_activation -> post_projection_norm_vals;
 		
-			prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+			prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, false);
 
 
@@ -2262,7 +2282,7 @@ void backwards_pass(Train_ResNet * trainer){
 		// activated output of batch norm layer from forward pass
 		bn_activated = cur_conv_block_activation -> post_expanded_norm_vals;
 		
-		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+		prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, false);
 
 		printDeviceData("CONV BLOCK OUTPUT ACTIVATION & NORM DERIV", bn_input_deriv, print_size);
@@ -2312,7 +2332,7 @@ void backwards_pass(Train_ResNet * trainer){
 		// activated output of batch norm layer from forward pass
 		bn_activated = cur_conv_block_activation -> post_spatial_activated;
 		
-		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+		prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
 
 		printDeviceData("SPATIAL ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
@@ -2363,7 +2383,7 @@ void backwards_pass(Train_ResNet * trainer){
 		// activated output of batch norm layer from forward pass
 		bn_activated = cur_conv_block_activation -> post_reduced_activated;
 		
-		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+		prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
 
 		printDeviceData("REDUCED ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
@@ -2449,7 +2469,7 @@ void backwards_pass(Train_ResNet * trainer){
 	// activated output of batch norm layer from forward pass
 	bn_activated = activations -> init_conv_activated;
 		
-	prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
+	prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
 
 	printDeviceData("INIT CONV ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
@@ -2572,31 +2592,13 @@ void dump_batch_norm_cache(Train_ResNet * trainer, char * filepath, Cache_BatchN
 	free(cpu_means);
 	free(filepath_new);
 
-	print_ret = asprintf(&filepath_new, "%svars.buffer", filepath);
+	print_ret = asprintf(&filepath_new, "%sinv_vars.buffer", filepath);
 	float * cpu_vars = (float *) malloc(filters * sizeof(float));
-	cudaMemcpy(cpu_vars, cache_batchnorm -> vars, filters * sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(cpu_vars, cache_batchnorm -> inv_vars, filters * sizeof(float), cudaMemcpyDeviceToHost);
 	fp = fopen(filepath_new, "wb");
 	n_wrote = fwrite(cpu_vars, sizeof(float), filters, fp);
 	fclose(fp);
 	free(cpu_vars);
-	free(filepath_new);
-
-	print_ret = asprintf(&filepath_new, "%snorm_temp.buffer", filepath);
-	float * cpu_norm_temp = (float *) malloc(input_size * sizeof(float));
-	cudaMemcpy(cpu_norm_temp, cache_batchnorm -> normalized_temp, input_size * sizeof(float), cudaMemcpyDeviceToHost);
-	fp = fopen(filepath_new, "wb");
-	n_wrote = fwrite(cpu_norm_temp, sizeof(float), input_size, fp);
-	fclose(fp);
-	free(cpu_norm_temp);
-	free(filepath_new);
-
-	print_ret = asprintf(&filepath_new, "%snorm.buffer", filepath);
-	float * cpu_norm = (float *) malloc(input_size * sizeof(float));
-	cudaMemcpy(cpu_norm, cache_batchnorm -> normalized, input_size * sizeof(float), cudaMemcpyDeviceToHost);
-	fp = fopen(filepath_new, "wb");
-	n_wrote = fwrite(cpu_norm, sizeof(float), input_size, fp);
-	fclose(fp);
-	free(cpu_norm);
 	free(filepath_new);
 }
 
