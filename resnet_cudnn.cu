@@ -1651,9 +1651,11 @@ void prepareAndDoBatchNormAndActivate(Train_ResNet * trainer, BatchNorm * batch_
 	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
-	cudnnDeriveBNTensorDescriptor(bn_descriptor, input_descriptor, BATCHNORM_MODE_SPATIAL);
+	cudnnBatchNormMode_t bn_mode = BATCHNORM_MODE_SPATIAL;
 
-	cudnnBatchNormalizationForwardTraining(trainer -> cudnnHandle, BATCHNORM_MODE_SPATIAL, &alpha_dummy, &beta_dummy, input_descriptor, input, input_descriptor, output, bn_descriptor, gamma, beta, 1, NULL, NULL, trainer -> eps, means_out, inv_vars_out);
+	cudnnDeriveBNTensorDescriptor(bn_descriptor, input_descriptor, bn_mode);
+
+	cudnnBatchNormalizationForwardTraining(trainer -> cudnnHandle, bn_mode, &alpha_dummy, &beta_dummy, input_descriptor, input, input_descriptor, output, bn_descriptor, gamma, beta, 1, NULL, NULL, trainer -> eps, means_out, inv_vars_out);
 
 	cudnnDestroyTensorDescriptor(input_descriptor);
 	cudnnDestroyTensorDescriptor(bn_descriptor);
@@ -1702,9 +1704,11 @@ void prepareAndDoActivationAndBatchNormDeriv(Train_ResNet * trainer, BatchNorm *
 	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
-	cudnnDeriveBNTensorDescriptor(bn_descriptor, layer_descriptor, BATCHNORM_MODE_SPATIAL);
+	cudnnBatchNormMode_t bn_mode = BATCHNORM_MODE_SPATIAL;
 
-	cudnnBatchNormalizationBackward(trainer -> cudnnHandle, BATCHNORM_MODE_SPATIAL, &alpha_data, &beta_data, &alpha_param, &beta_param, 
+	cudnnDeriveBNTensorDescriptor(bn_descriptor, layer_descriptor, bn_mode);
+
+	cudnnBatchNormalizationBackward(trainer -> cudnnHandle, bn_mode, &alpha_data, &beta_data, &alpha_param, &beta_param, 
 											layer_descriptor, input, layer_descriptor, out_layer_deriv, layer_descriptor, input_deriv,
 											bn_descriptor, gamma, gamma_deriv, beta_deriv, eps, means, inv_vars);
 
