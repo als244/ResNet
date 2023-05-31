@@ -1651,7 +1651,7 @@ void prepareAndDoBatchNormAndActivate(Train_ResNet * trainer, BatchNorm * batch_
 	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
-	cudnnBatchNormMode_t bn_mode = BATCHNORM_MODE_SPATIAL;
+	cudnnBatchNormMode_t bn_mode = CUDNN_BATCHNORM_SPATIAL;
 
 	cudnnDeriveBNTensorDescriptor(bn_descriptor, input_descriptor, bn_mode);
 
@@ -1704,7 +1704,7 @@ void prepareAndDoActivationAndBatchNormDeriv(Train_ResNet * trainer, BatchNorm *
 	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
-	cudnnBatchNormMode_t bn_mode = BATCHNORM_MODE_SPATIAL;
+	cudnnBatchNormMode_t bn_mode = CUDNN_BATCHNORM_SPATIAL;
 
 	cudnnDeriveBNTensorDescriptor(bn_descriptor, layer_descriptor, bn_mode);
 
