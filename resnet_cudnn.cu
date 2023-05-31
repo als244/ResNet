@@ -3203,10 +3203,10 @@ void update_parameters(Train_ResNet * trainer){
 	// also dump when nan or inf occurs (data dumped to id=99999999)
 	int cur_dump_id = trainer -> cur_dump_id;
 
-	if (cur_dump_id % 1000 == 0){
-		printf("DUMPING TRAINER...!\n\n");
-		dump_trainer(cur_dump_id, trainer);
-	}
+	//if (cur_dump_id % 1000 == 0){
+	//	printf("DUMPING TRAINER...!\n\n");
+	//	dump_trainer(cur_dump_id, trainer);
+	//}
 	
 	for (int i = n_locations - 1; i >= 0; i--){
 		param_size = param_sizes[i];
