@@ -632,100 +632,6 @@ __global__ void filterAvgPoolDeriv(const float * pooled_deriv, int filters, int 
 	}
 }
 
-
-
-// hardcoded conv kernel for initial 7x7, stride 2, 64 output filter convolutional layer...
-// launching (14, 112, BATCH_SIZE) dim blocks where each block has 112/14=8 phases to utilize shared memory. Each block will have dim (64).
-// Each block will contribute 16 unique spatial inds * 64 output filters * 32 Batch Size to the output of layer
-// each phase loads stride new rows into shared memory, then multiples new spatial shared_mem with conv_weights, accounting for conv weight col permuation 
-
-/* MAY OR MAY NOT WORK... (commented becuase not used...) */
-
-// __global__ void optimized_init_conv(const float * input, const float * weights, float * out){
-
-// 	__shared__ float conv_weights[64][147];
-// 	__shared__ float spatial_vals[147];
-
-// 	// index
-// 	int output_filter = threadIdx.x;
-// 	int sample_ind = blockIdx.z;
-
-// 	// assume weights are in order of outfilter 0: [R_0,0, B_0,0, G_0,0, R_0,1, G_0,1, B_0,1....R_6,6, G_6,6, B_6,6], outfilter 1: [...], ...., outfilter 63: [...]
-// 	for (int kernel_ind = 0; kernel_ind < 147; kernel_ind++){
-// 		conv_weights[output_filter][kernel_ind] = weights[output_filter * 147 + kernel_ind];
-// 	}o
-
-// 	// 2 * vals because stride of 2
-// 	int spatial_row_start = (224 / blockDim.x) * blockIdx.x;
-// 	int spatial_col_start = 2 * blockIdx.y;
-// 	int spatial_row, spatial_col, kernel_ind;
-// 	int half_kernel_dim = 3;
-// 	for (int row_offset = -half_kernel_dim; row_offset <= half_kernel_dim;  row_offset++){
-// 		for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
-// 			for (int channel = 0; channel < 3; channel++){
-// 				spatial_row = spatial_row_start + row_offset;
-// 				spatial_col = spatial_col_start + col_offset;
-// 				kernel_ind = 7 * 3 * (row_offset + half_kernel_dim) + 3 * (col_offset + half_kernel_dim) + channel;
-// 				if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
-// 					spatial_vals[kernel_ind] = 0;
-// 				}
-// 				else{
-// 					spatial_vals[kernel_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
-// 				}
-// 			}
-// 		}
-// 	}
-
-// 	__syncthreads();
-
-// 	float val = 0;
-// 	int circular_row = 0;
-// 	int out_spatial_row = (112 / blockDim.x) * blockIdx.x;
-// 	int out_spatial_col = blockIdx.y;
-// 	int new_top_row = 0;
-// 	for (int phase = 0; phase < 8; phase++){
-
-// 		// compute matrix mult to get (output_filt x batch_size) result. this is for a single receptive field across depth and batches
-// 		// iterative over phases to get multiple receptive fields and exploit spatial locality
-// 		val = 0;
-// 		for (int kern_row = 0; kern_row < 7; kern_row++){
-// 			for (int kern_col = 0; kern_col < 7; kern_col++){
-// 				for (int ch = 0; ch < 3; ch++){
-// 					circular_row = (kern_row + 2 * phase) % 7;
-// 					val += conv_weights[output_filter][7 * 3 * kern_row + 3 * kern_col + ch] * spatial_vals[7 * 3 * circular_row + 3 * kern_col + ch];
-// 				}
-// 			}
-// 		}
-
-// 		out[112 * 112 * 64 * sample_ind + 112 * 64 * out_spatial_row + 64 * out_spatial_col + output_filter] = val;
-
-// 		__syncthreads();
-
-// 		int row_to_replace, replace_ind;
-// 		for (int i = 1; i <= 2; i++){
-// 			row_to_replace = (2 * phase) + i % 7;
-// 			spatial_row = spatial_row_start + half_kernel_dim + 2 * phase + i; 
-// 			for (int col_offset = -half_kernel_dim; col_offset <= half_kernel_dim; col_offset++){
-// 				for (int channel = 0; channel < 3; channel++){
-// 					spatial_col = spatial_col_start + col_offset;
-// 					replace_ind = 7 * 3 * row_to_replace + 3 * (col_offset + half_kernel_dim) + channel;
-// 					if ((spatial_row < 0) || (spatial_row >= 224) || (spatial_col < 0) || (spatial_col >= 224)) {
-// 						spatial_vals[replace_ind][sample_ind] = 0;
-// 					}
-// 					else{
-// 						spatial_vals[replace_ind][sample_ind] = input[224 * 224 * 3 * sample_ind + 224 * 3 * spatial_row + 3 * spatial_col + channel];
-// 					}
-// 				}
-// 			}
-// 		}
-// 		out_spatial_row++;
-
-// 		__syncthreads();
-// 	}
-// }
-
-
-
 __global__ void doActivation(int size, const float * input, float * output){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
@@ -1595,8 +1501,14 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	cudnnCreateConvolutionDescriptor(&convolution_descriptor);
 	cudnnSetConvolution2dDescriptor(convolution_descriptor, 1, 1, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
 
-	cudnnConvolutionFwdAlgo_t convolution_algorithm;
-	cudnnGetConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convolution_algorithm);
+	//deprecated as of cuDNN 8
+	// cudnnGetConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convolution_algorithm);
+
+	int returned_cnt;
+	cudnnConvolutionFwdAlgoPerf_t * top_algo = malloc(sizeof(cudnnConvolutionFwdAlgoPerf_t));
+	cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
+	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
+	free(top_algo);
 
 	size_t workspace_bytes = 0;
 	cudnnGetConvolutionForwardWorkspaceSize(cudnn, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
@@ -1637,17 +1549,52 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 	cudnnCreateConvolutionDescriptor(&convolution_descriptor);
 	cudnnSetConvolution2dDescriptor(convolution_descriptor, 1, 1, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
 
+	const float alpha = 1, beta = 0;
 
+	int returned_cnt;
+
+	size_t workspace_bytes = 0;
 
 	// Compute deriv w.r.t input data
 	if (toComputeInputDeriv){
 
+		cudnnConvolutionBwdDataAlgoPerf_t * top_data_algo = malloc(sizeof(cudnnConvolutionBwdDataAlgoPerf_t));
+		cudnnGetConvolutionBackwardDataAlgorithm_v7(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, 1, &returned_cnt, top_data_algo);
+		cudnnConvolutionBwdDataAlgo_t convolution_data_algorithm = top_data_algo[0].algo;
+		free(top_data_algo);
+		
+		cudnnGetConvolutionBackwardDataWorkspaceSize(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, convolution_data_algorithm, &workspace_bytes);
+
+		void * workspace_data;
+		cudaMalloc(&workspace_data, workspace_bytes);
+
+		cudnnConvolutionBackwardData(trainer -> cudnnHandle, &alpha, kernel_descriptor, weights, output_descriptor, out_deriv, convolution_descriptor, convolution_data_algorithm, 
+										workspace_data, workspace_bytes, &beta, input_descriptor, input_deriv);
+	
+		cudaFree(workspace_data);
+		workspace_bytes = 0;
 	}
 
 
 	// Compute deriv w.r.t filter weights
+	cudnnConvolutionBwdFilterAlgoPerf_t * top_filter_algo = malloc(sizeof(cudnnConvolutionBwdFilterAlgoPerf_t));
+	cudnnGetConvolutionBackwardFilterAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, 1, &returned_cnt, top_filter_algo);
+	cudnnConvolutionBwdFilterAlgo_t convolution_filter_algorithm = top_filter_algo[0].algo;
+	free(top_filter_algo);
 
+	cudnnGetConvolutionBackwardFilterWorkspaceSize(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, convolution_filter_algorithm, &workspace_bytes);
 
+	void * workspace_filter;
+	cudaMalloc(&workspace_filter, workspace_bytes);
+
+	cudnnConvolutionBackwardFilter(trainer -> cudnnHandle, &alpha, input_descriptor, input, output_descriptor, out_deriv, convolution_descriptor, convolution_filter_algorithm, 
+									workspace_filter, workspace_bytes, &beta, kernel_descriptor, weight_deriv);
+
+	cudaFree(workspace_filter);
+	cudnnDestroyTensorDescriptor(input_descriptor);
+	cudnnDestroyTensorDescriptor(output_descriptor);
+	cudnnDestroyFilterDescriptor(kernel_descriptor);
+	cudnnDestoryConvolutionDescriptor(convolution_descriptor);
 }
 
 
