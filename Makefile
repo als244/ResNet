@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -g3 -std=c99 -pedantic -Wall
 
-all: ResNet ResNetOpt ResNetClean ResNetCleanOpt
+all: ResNet ResNetOpt ResNetClean ResNetCleanOpt ResNetCuDNN ResNetCuDNNOpt
 
 ResNet: resnet.cu
 	nvcc -g -G -arch=sm_80 resnet.cu -lcurand -o ResNet
