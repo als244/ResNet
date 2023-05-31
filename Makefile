@@ -1,13 +1,20 @@
 CC = gcc
 CFLAGS = -g3 -std=c99 -pedantic -Wall
 
-all: ResNet ResNetOpt
+all: ResNet ResNetOpt ResNetClean ResNetCleanOpt
 
 ResNet: resnet.cu
-	nvcc -g -G resnet.cu -lcurand -o ResNet
+	nvcc -g -G -arch=sm_80 resnet.cu -lcurand -o ResNet
 
 ResNetOpt: resnet.cu
-	nvcc -O3 resnet.cu -lcurand -o ResNetOpt
+	nvcc -O3 -arch=sm_80 resnet.cu -lcurand -o ResNetOpt
+
+ResNetClean: resnet_clean.cu
+	nvcc -g -G -arch=sm_80 resnet_clean.cu -lcurand -o ResNetClean
+
+ResNetCleanOpt: resnet_clean.cu
+	nvcc -O3 -arch=sm_80 resnet_clean.cu -lcurand -o ResNetCleanOpt
 
 BuildShards: build_training_shards.c
 	${CC} ${CFLAGS} -o $@ $^
+
