@@ -1579,10 +1579,9 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
          // CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED
      	 // };
 
-		cudnnConvolutionBwdDataAlgoPerf_t * top_data_algo = (cudnnConvolutionBwdDataAlgoPerf_t *) malloc(sizeof(cudnnConvolutionBwdDataAlgoPerf_t));
+		cudnnConvolutionBwdDataAlgoPerf_t top_data_algo[1];
 		cudnnGetConvolutionBackwardDataAlgorithm_v7(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, 1, &returned_cnt, top_data_algo);
 		cudnnConvolutionBwdDataAlgo_t convolution_data_algorithm = top_data_algo[0].algo;
-		free(top_data_algo);
 		
 		cudnnGetConvolutionBackwardDataWorkspaceSize(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, convolution_data_algorithm, &workspace_bytes);
 
@@ -1607,10 +1606,9 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 
 	// Compute deriv w.r.t filter weights
-	cudnnConvolutionBwdFilterAlgoPerf_t * top_filter_algo = (cudnnConvolutionBwdFilterAlgoPerf_t *) malloc(sizeof(cudnnConvolutionBwdFilterAlgoPerf_t));
+	cudnnConvolutionBwdFilterAlgoPerf_t top_filter_algo[1];
 	cudnnGetConvolutionBackwardFilterAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, 1, &returned_cnt, top_filter_algo);
 	cudnnConvolutionBwdFilterAlgo_t convolution_filter_algorithm = top_filter_algo[0].algo;
-	free(top_filter_algo);
 
 	cudnnGetConvolutionBackwardFilterWorkspaceSize(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, convolution_filter_algorithm, &workspace_bytes);
 
