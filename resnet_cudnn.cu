@@ -1489,11 +1489,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	status = cudnnCreateTensorDescriptor(&input_descriptor);
 	status = cudnnSetTensor4dDescriptor(input_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, in_filters, in_spatial_dim, in_spatial_dim);
 
-	int out_spatial_dim = in_spatial_dim / stride;
-
-	cudnnTensorDescriptor_t output_descriptor;
-	status = cudnnCreateTensorDescriptor(&output_descriptor);
-	status = cudnnSetTensor4dDescriptor(output_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, out_filters, out_spatial_dim, out_spatial_dim);
+	
 
 	cudnnFilterDescriptor_t kernel_descriptor;
 	status = cudnnCreateFilterDescriptor(&kernel_descriptor);
@@ -1502,6 +1498,17 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	status = cudnnCreateConvolutionDescriptor(&convolution_descriptor);
 	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, 0, 0, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
+
+
+	int n, c, h, w;
+	cudnnStatus_t cudnnGetConvolution2dForwardOutputDim(convolution_descriptor, input_descriptor, kernel_descriptor, &n, &c, &h, &w);
+	
+
+	int out_spatial_dim = in_spatial_dim / stride;
+
+	cudnnTensorDescriptor_t output_descriptor;
+	status = cudnnCreateTensorDescriptor(&output_descriptor);
+	status = cudnnSetTensor4dDescriptor(output_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, out_filters, out_spatial_dim, out_spatial_dim);
 
 	printf("CuDNN in Prep Convolution, Create and Set: %s\n", cudnnGetErrorString(status));
 
