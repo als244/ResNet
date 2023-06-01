@@ -1512,7 +1512,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
 	free(top_algo);
 
-	printf("CuDNN in Prep Convolution: %s\n", cudnnGetErrorString(status);
+	printf("CuDNN in Prep Convolution: %s\n", cudnnGetErrorString(status));
 
 	size_t workspace_bytes = 0;
 	cudnnGetConvolutionForwardWorkspaceSize(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
