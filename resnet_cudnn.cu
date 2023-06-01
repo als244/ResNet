@@ -1503,6 +1503,8 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	status = cudnnCreateConvolutionDescriptor(&convolution_descriptor);
 	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, 1, 1, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
 
+	printf("CuDNN in Prep Convolution, Create and Set Tensors: %s\n", cudnnGetErrorString(status));
+
 	//deprecated as of cuDNN 8
 	// cudnnGetConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convolution_algorithm);
 
@@ -1512,7 +1514,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
 	free(top_algo);
 
-	printf("CuDNN in Prep Convolution: %s\n", cudnnGetErrorString(status));
+	printf("CuDNN in Prep Convolution, Get Algorithm: %s\n", cudnnGetErrorString(status));
 
 	size_t workspace_bytes = 0;
 	cudnnGetConvolutionForwardWorkspaceSize(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
