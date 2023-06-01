@@ -1497,7 +1497,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	status = cudnnCreateConvolutionDescriptor(&convolution_descriptor);
-	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, 0, 0, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
+	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, kern_dim / 2, kern_dim / 2, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
 
 
 	int n, c, h, w;
