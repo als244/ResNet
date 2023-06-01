@@ -1491,7 +1491,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 
 	cudnnFilterDescriptor_t kernel_descriptor;
 	status = cudnnCreateFilterDescriptor(&kernel_descriptor);
-	status = cudnnSetFilter4dDescriptor(kernel_descriptor, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, out_filters, in_filters, kern_dim, kern_dim);
+	status = cudnnSetFilter4dDescriptor(kernel_descriptor, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NHWC, out_filters, in_filters, kern_dim, kern_dim);
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	status = cudnnCreateConvolutionDescriptor(&convolution_descriptor);
@@ -1555,7 +1555,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 	cudnnFilterDescriptor_t kernel_descriptor;
 	cudnnCreateFilterDescriptor(&kernel_descriptor);
-	cudnnSetFilter4dDescriptor(kernel_descriptor, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, out_filters, in_filters, kern_dim, kern_dim);
+	cudnnSetFilter4dDescriptor(kernel_descriptor, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NHWC, out_filters, in_filters, kern_dim, kern_dim);
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	cudnnCreateConvolutionDescriptor(&convolution_descriptor);
