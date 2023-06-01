@@ -1483,33 +1483,36 @@ void prepareAndDoConvolutionScratch(int in_spatial_dim, int kern_dim, int in_fil
 
 void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int kern_dim, int in_filters, int out_filters,  int stride, int batch_size, 
 																float * input, float * weights, float * output){
+	cudnnStatus_t status;
 
 	cudnnTensorDescriptor_t input_descriptor;
-	cudnnCreateTensorDescriptor(&input_descriptor);
-	cudnnSetTensor4dDescriptor(input_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, in_filters, in_spatial_dim, in_spatial_dim);
+	status = cudnnCreateTensorDescriptor(&input_descriptor);
+	status = cudnnSetTensor4dDescriptor(input_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, in_filters, in_spatial_dim, in_spatial_dim);
 
 	int out_spatial_dim = in_spatial_dim / stride;
 
 	cudnnTensorDescriptor_t output_descriptor;
-	cudnnCreateTensorDescriptor(&output_descriptor);
-	cudnnSetTensor4dDescriptor(output_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, out_filters, out_spatial_dim, out_spatial_dim);
+	status = cudnnCreateTensorDescriptor(&output_descriptor);
+	status = cudnnSetTensor4dDescriptor(output_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, out_filters, out_spatial_dim, out_spatial_dim);
 
 	cudnnFilterDescriptor_t kernel_descriptor;
-	cudnnCreateFilterDescriptor(&kernel_descriptor);
-	cudnnSetFilter4dDescriptor(kernel_descriptor, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, out_filters, in_filters, kern_dim, kern_dim);
+	status = cudnnCreateFilterDescriptor(&kernel_descriptor);
+	status = cudnnSetFilter4dDescriptor(kernel_descriptor, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, out_filters, in_filters, kern_dim, kern_dim);
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
-	cudnnCreateConvolutionDescriptor(&convolution_descriptor);
-	cudnnSetConvolution2dDescriptor(convolution_descriptor, 1, 1, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
+	status = cudnnCreateConvolutionDescriptor(&convolution_descriptor);
+	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, 1, 1, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
 
 	//deprecated as of cuDNN 8
 	// cudnnGetConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convolution_algorithm);
 
 	int returned_cnt;
 	cudnnConvolutionFwdAlgoPerf_t * top_algo = (cudnnConvolutionFwdAlgoPerf_t *) malloc(sizeof(cudnnConvolutionFwdAlgoPerf_t));
-	cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
+	status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
 	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
 	free(top_algo);
+
+	printf("CuDNN in Prep Convolution: %s\n", cudnnGetErrorString(status);
 
 	size_t workspace_bytes = 0;
 	cudnnGetConvolutionForwardWorkspaceSize(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
