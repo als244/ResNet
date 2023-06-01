@@ -1501,7 +1501,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 
 
 	int n, c, h, w;
-	cudnnStatus_t cudnnGetConvolution2dForwardOutputDim(convolution_descriptor, input_descriptor, kernel_descriptor, &n, &c, &h, &w);
+	status = cudnnGetConvolution2dForwardOutputDim(convolution_descriptor, input_descriptor, kernel_descriptor, &n, &c, &h, &w);
 	
 
 	int out_spatial_dim = in_spatial_dim / stride;
