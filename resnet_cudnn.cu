@@ -1499,11 +1499,6 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	status = cudnnCreateConvolutionDescriptor(&convolution_descriptor);
 	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, kern_dim / 2, kern_dim / 2, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
 
-
-	int n, c, h, w;
-	status = cudnnGetConvolution2dForwardOutputDim(convolution_descriptor, input_descriptor, kernel_descriptor, &n, &c, &h, &w);
-	printf("Conv Forward Output Dim -- N: %d, C: %d, H: %d, W: %d\n\n", n, c, h, w);
-
 	int out_spatial_dim = in_spatial_dim / stride;
 
 	cudnnTensorDescriptor_t output_descriptor;
@@ -1515,10 +1510,10 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	//deprecated as of cuDNN 8
 	// cudnnGetConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convolution_algorithm);
 
-	// int returned_cnt;
-	// cudnnConvolutionFwdAlgoPerf_t top_algo[1];
-	// status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
-	// cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
+	int returned_cnt;
+	cudnnConvolutionFwdAlgoPerf_t top_algo[1];
+	status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
+	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
 
 	// const algo_t algos[] = {
     //       CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
@@ -1530,8 +1525,6 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
     //       CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD,
     //       CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED,
     //  };
-
-    cudnnConvolutionFwdAlgo_t convolution_algorithm = CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED;
 
 	size_t workspace_bytes = 0;
 	status = cudnnGetConvolutionForwardWorkspaceSize(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
@@ -1575,7 +1568,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	cudnnCreateConvolutionDescriptor(&convolution_descriptor);
-	cudnnSetConvolution2dDescriptor(convolution_descriptor, 0, 0, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
+	cudnnSetConvolution2dDescriptor(convolution_descriptor, kern_dim / 2, kern_dim / 2, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
 
 	const float alpha = 1, beta = 0;
 
