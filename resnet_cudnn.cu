@@ -1501,7 +1501,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	status = cudnnCreateConvolutionDescriptor(&convolution_descriptor);
-	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, 0, 0, stride, stride, 0, 0, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
+	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, 0, 0, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
 
 	printf("CuDNN in Prep Convolution, Create and Set: %s\n", cudnnGetErrorString(status));
 
@@ -1568,7 +1568,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	cudnnCreateConvolutionDescriptor(&convolution_descriptor);
-	cudnnSetConvolution2dDescriptor(convolution_descriptor, 0, 0, stride, stride, 0, 0, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
+	cudnnSetConvolution2dDescriptor(convolution_descriptor, 0, 0, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
 
 	const float alpha = 1, beta = 0;
 
