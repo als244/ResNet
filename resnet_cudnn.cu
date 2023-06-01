@@ -3629,7 +3629,7 @@ int main(int argc, char *argv[]) {
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			printf("Status after loading batch: %s\n\n", cudaGetErrorString(status));
+			//printf("Status after loading batch: %s\n\n", cudaGetErrorString(status));
 			
 
 			/* DO FORWARD PROP */
@@ -3639,7 +3639,7 @@ int main(int argc, char *argv[]) {
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			printf("Status after forward pass: %s\n\n", cudaGetErrorString(status));
+			//printf("Status after forward pass: %s\n\n", cudaGetErrorString(status));
 			
 
 			/* RECORD LOSS AND ACCURACY */
@@ -3683,7 +3683,7 @@ int main(int argc, char *argv[]) {
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			printf("Status after backwards pass: %s\n\n", cudaGetErrorString(status));
+			//printf("Status after backwards pass: %s\n\n", cudaGetErrorString(status));
 
 			/* OPTIMIZE WEIGHTS */
 			printf("Applying Optimizer to Update Params...\n\n");
@@ -3691,7 +3691,7 @@ int main(int argc, char *argv[]) {
 
 			cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			printf("Status after updating params: %s\n\n", cudaGetErrorString(status));
+			//printf("Status after updating params: %s\n\n", cudaGetErrorString(status));
 
 		}
 
