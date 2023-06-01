@@ -1508,21 +1508,35 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	//deprecated as of cuDNN 8
 	// cudnnGetConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convolution_algorithm);
 
-	int returned_cnt;
-	cudnnConvolutionFwdAlgoPerf_t top_algo[1];
-	status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
-	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
+	// int returned_cnt;
+	// cudnnConvolutionFwdAlgoPerf_t top_algo[1];
+	// status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
+	// cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
 
-	printf("CuDNN in Prep Convolution, Get Algorithm: %s\n", cudnnGetErrorString(status));
+	// const algo_t algos[] = {
+    //       CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
+    //       CUDNN_CONVOLUTION_FWD_ALGO_FFT,
+    //       CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING,
+    //       CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+    //       CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,
+    //       CUDNN_CONVOLUTION_FWD_ALGO_DIRECT,
+    //       CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD,
+    //       CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED,
+    //  };
+
+    cudnnConvolutionFwdAlgo_t convolution_algorithm = CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED;
 
 	size_t workspace_bytes = 0;
-	cudnnGetConvolutionForwardWorkspaceSize(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
+	status = cudnnGetConvolutionForwardWorkspaceSize(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, convolution_algorithm, &workspace_bytes);
 
 	void * workspace;
 	cudaMalloc(&workspace, workspace_bytes);
 
 	const float alpha = 1, beta = 0;
-	cudnnConvolutionForward(trainer -> cudnnHandle, &alpha, input_descriptor, input, kernel_descriptor, weights, convolution_descriptor, convolution_algorithm, workspace, workspace_bytes, &beta, output_descriptor, output);
+	status = cudnnConvolutionForward(trainer -> cudnnHandle, &alpha, input_descriptor, input, kernel_descriptor, weights, convolution_descriptor, convolution_algorithm, workspace, workspace_bytes, &beta, output_descriptor, output);
+
+
+	printf("CuDNN after Forward Convolution: %s\n", cudnnGetErrorString(status));
 
 	cudaFree(workspace);
 	cudnnDestroyTensorDescriptor(input_descriptor);
