@@ -1515,6 +1515,8 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
 	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
 
+	printf("CuDNN after Get Forward Algo: %s\n", cudnnGetErrorString(status));
+
 	// const algo_t algos[] = {
     //       CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
     //       CUDNN_CONVOLUTION_FWD_ALGO_FFT,
