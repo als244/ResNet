@@ -3491,7 +3491,7 @@ int main(int argc, char *argv[]) {
 	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS);
 
 	// OVERRIDE IF LOADING WEIGHTS
-	int LOAD_FROM_DUMP_ID = 39000;
+	int LOAD_FROM_DUMP_ID = -1;
 	
 	if (LOAD_FROM_DUMP_ID != -1){
 		overwrite_trainer_hyperparams(trainer, LOAD_FROM_DUMP_ID);
