@@ -195,7 +195,7 @@ __global__ void convolutionDerivInput(const float * input, const float * weights
 				// get kernel index used to generate out spatial value for corresponding input spatial value
 				kern_row_ind = spatial_row - out_spatial_row * stride + half_kernel_dim;
 				kern_col_ind = spatial_col - out_spatial_col * stride + half_kernel_dim;
-				kern_ind = kern_dim * in_filters * kern_row_ind + in_filters * kern_col_ind + in_filter_id;
+				kern_ind = kern_dim * kern_dim * in_filter_id + kern_dim * kern_row_ind + kern_col_ind;
 				if ((kern_row_ind < 0) || (kern_row_ind >= kern_dim) || (kern_col_ind < 0) || (kern_col_ind >= kern_dim) ||
 						(out_spatial_row < 0) || (out_spatial_row >= out_spatial_dim) || (out_spatial_col < 0) || (out_spatial_col >= out_spatial_dim)) {
 					out_spatial_val_deriv = 0;
@@ -245,7 +245,7 @@ __global__ void convolutionDerivWeights(const float * input, const float * weigh
 		return;
 	}
 
-	int kern_ind = kern_dim * in_filters * kern_row + in_filters * kern_col + in_filter_id;
+	int kern_ind = kern_dim * kern_dim * in_filter_id + kern_dim * kern_row + kern_col;
 
 	int kernel_size = (kern_dim * kern_dim * in_filters);
 	int half_kernel_dim = kern_dim / 2;
@@ -1443,8 +1443,6 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 
 	const float alpha = 1, beta = 0;
 	status = cudnnConvolutionForward(trainer -> cudnnHandle, &alpha, input_descriptor, input, kernel_descriptor, weights, convolution_descriptor, convolution_algorithm, workspace, workspace_bytes, &beta, output_descriptor, output);
-
-	printf("%s\n", cudnnGetErrorString(status));
 
 	cudaFree(workspace);
 	cudnnDestroyTensorDescriptor(input_descriptor);
@@ -3144,7 +3142,7 @@ void update_parameters(Train_ResNet * trainer){
 	// also dump when nan or inf occurs (data dumped to id=99999999)
 	int cur_dump_id = trainer -> cur_dump_id;
 
-	if (cur_dump_id < 1000){
+	if (cur_dump_id % 1000 == 0){
 		printf("DUMPING TRAINER...!\n\n");
 		dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
 	}
@@ -3363,7 +3361,7 @@ void testConvolution(int in_spatial_dim, int kern_dim, int in_filters, int out_f
 								in_spatial_row = in_spatial_row_start + row_offset;
 								in_spatial_col = in_spatial_col_start + col_offset;
 								input_ind = in_spatial_dim * in_spatial_dim * in_filters * samp + in_spatial_dim * in_filters * in_spatial_row + in_filters * in_spatial_col + in_filt;
-								kernel_ind = kern_dim * in_filters * (row_offset + half_kernel_dim) + in_filters * (col_offset + half_kernel_dim) + in_filt;
+								kernel_ind = kern_dim * kern_dim * in_filt + kern_dim * (row_offset + half_kernel_dim) + (col_offset + half_kernel_dim);
 								if ((in_spatial_row < 0) || (in_spatial_row >= in_spatial_dim) || (in_spatial_col < 0) || (in_spatial_col >= in_spatial_dim)) {
 									in_spatial_val = 0;
 								}
