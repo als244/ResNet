@@ -211,6 +211,7 @@ typedef struct {
 	float * accuracy_per_epoch;
 	int init_loaded;
 	cudnnHandle_t cudnnHandle;
+	const char * dump_dir;
 } Train_ResNet;
 
 

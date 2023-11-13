@@ -54,23 +54,8 @@ void init_weights_gaussian_device(curandGenerator_t * gen, int size, float *X, f
  	curandStatus_t status = curandGenerateNormal(*gen, X, (size_t) size, mean, stddev);
  }
 
-// RANDOM NUMBER GENERATOR ON DEVICE CAN'T USE C LIBRARY RAND(), so use cuRAND() library instead...
-// __global__ void sample_gaussian(int size, float *X, float mean, float var) {
-// 	int i = blockIdx.x * blockDim.x + threadIdx.x;
-// 	if (i >= size){
-// 		return;
-// 	}
-// 	if (var == 0){
-// 		X[i] = mean;
-// 		return;
-// 	}
-// 	float x = (float)rand() / RAND_MAX;
-//   	float y = (float)rand() / RAND_MAX;
-//   	float z = sqrtf(-2 * logf(x)) * cosf(2 * M_PI * y);
-//   	float std = sqrtf(var);
-//   	float val = std * z + mean;
-//   	X[i] = val;
-// }
+
+/* NON-OPTIMIZED CUSTOM KERNELS (non-bottleneck) */
 
 // ASSUME 1-D launch
 __global__ void addVec(int size, float * A, float * B, float * out){
@@ -80,51 +65,6 @@ __global__ void addVec(int size, float * A, float * B, float * out){
 	}
 	out[i] = A[i] + B[i];
 }
-
-// GRID has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
-// each BLOCK has dim (TILE_WIDTH, TILE_WIDTH)
-__global__ void matMulOptimized(const float *M, const float *N, int m, int k, int n, float *out){
-	__shared__ float M_tile[TILE_WIDTH][TILE_WIDTH + 1];
-	__shared__ float N_tile[TILE_WIDTH][TILE_WIDTH + 1];
-
-	int block_x = blockIdx.x;
-	int block_y = blockIdx.y;
-
-	int thread_x = threadIdx.x;
-	int thread_y = threadIdx.y;
-
-	int row_ind = block_x * TILE_WIDTH + thread_x;
-	int col_ind = block_y * TILE_WIDTH + thread_y;
-
-	if (row_ind >= m || col_ind >= n){
-		return;
-	}
-
-	float val = 0;
-	for (int phase = 0; phase < ceil((float) k / float(TILE_WIDTH)); phase++) {
-		if (phase * TILE_WIDTH + thread_y < k){
-			M_tile[thread_x][thread_y] = M[row_ind * k + phase * TILE_WIDTH + thread_y];
-		}
-		else{
-			M_tile[thread_x][thread_y] = 0;
-		}
-		if (phase * TILE_WIDTH + thread_x < k){
-			N_tile[thread_x][thread_y] = N[(phase * TILE_WIDTH + thread_x) * n + col_ind];
-		}
-		else{
-			N_tile[thread_x][thread_y] = 0;
-		}
-
-		__syncthreads();
-
-		for (int t = 0; t < TILE_WIDTH; t++){
-			val += M_tile[thread_x][t] * N_tile[t][thread_y];
-		}
-		__syncthreads();
-	}
-	out[row_ind * n + col_ind] = val;
-}
-
 
 // GRID has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
 // each BLOCK has dim (TILE_WIDTH, TILE_WIDTH)
@@ -143,37 +83,6 @@ __global__ void matMul(const float *M, const float *N, int m, int k, int n, floa
 		val += M[row_ind * k + z] * N[z * n + col_ind];
 	}
 	out[row_ind * n + col_ind] = val;
-}
-
-
-// unoptimized transpose because used rarely...
-
-// grid has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
-// each BLOCK has dim (TILE_WIDTH , BLOCK_ROWS) = # of threads
-__global__ void transposeSharedMem(const float *in, int rows, int cols, float * out) {
-  __shared__ float tile[TILE_WIDTH][TILE_WIDTH + 1];
-
-  int row_ind = blockIdx.x * TILE_WIDTH + threadIdx.y;
-  int col_ind = blockIdx.y * TILE_WIDTH + threadIdx.x;
-  
-  
-  if (col_ind >= cols || row_ind >= rows){
-  	return;
-  }
-
-  
-  // each thread needs to load TILE_WIDTH / BLOCK_ROWS values
-  int row_boundary = min(TILE_WIDTH, rows - row_ind);
-  for (int j = 0; j < row_boundary; j += BLOCK_ROWS){
-     tile[threadIdx.y + j][threadIdx.x] = in[(row_ind+j)*cols + col_ind];
-  }
-
-  __syncthreads();
-
-  int col_boundary = min(TILE_WIDTH, cols - col_ind);
-  for (int j = 0; j < col_boundary; j += BLOCK_ROWS){
-     out[col_ind*rows + row_ind + j] = tile[threadIdx.y + j][threadIdx.x];
-  }
 }
 
 // grid has dim (ROWS / TILE_WIDTH, COLS/TILE_WIDTH)
@@ -228,7 +137,7 @@ __global__ void doConvolution(const float * input, const float * weights, int sp
 				// compute spatial value
 				in_spatial_row = in_spatial_row_start + row_offset;
 				in_spatial_col = in_spatial_col_start + col_offset;
-				kernel_ind = kern_dim * in_filters * (row_offset + half_kernel_dim) + in_filters * (col_offset + half_kernel_dim) + in_channel;
+				kernel_ind = kern_dim * kern_dim * in_channel  + kern_dim * (row_offset + half_kernel_dim) + (col_offset + half_kernel_dim);
 				if ((in_spatial_row < 0) || (in_spatial_row >= spatial_dim) || (in_spatial_col < 0) || (in_spatial_col >= spatial_dim)) {
 					in_spatial_val = 0;
 				}
@@ -1240,7 +1149,7 @@ Backprop_Buffer * init_backprop_buffer(Dims * dims, ConvBlock ** conv_blocks, in
 }
 
 
-Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, float learning_rate, float weight_decay, float mean_decay, float var_decay, float eps, int n_epochs, cudnnHandle_t * handle){
+Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, float learning_rate, float weight_decay, float mean_decay, float var_decay, float eps, int n_epochs, cudnnHandle_t * handle, const char * dump_dir){
 	Train_ResNet * trainer = (Train_ResNet *) malloc(sizeof(Train_ResNet));
 
 	trainer -> model = model;
@@ -1275,6 +1184,9 @@ Train_ResNet * init_trainer(ResNet * model, Batch * cur_batch, int batch_size, f
 	trainer -> init_loaded = 0;
 
 	trainer -> cudnnHandle = *handle;
+
+	trainer -> dump_dir = dump_dir;
+
 	return trainer;
 }
 
@@ -1477,6 +1389,7 @@ void prepareAndDoConvolutionScratch(int in_spatial_dim, int kern_dim, int in_fil
 	dim3 gridDimConv(out_spatial_dim, out_spatial_dim, out_filters_grid);
 	dim3 blockDimConv(batch_size, out_filters_block);
 
+	printf("Grid: (%d, %d, %d)\nBlock: (%d, %d)\n", out_spatial_dim, out_spatial_dim, out_filters_grid, batch_size, out_filters_block);
 	doConvolution <<< gridDimConv, blockDimConv>>> (input, weights, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, output);
 }
 
@@ -1495,7 +1408,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	status = cudnnCreateConvolutionDescriptor(&convolution_descriptor);
-	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, kern_dim / 2, kern_dim / 2, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
+	status = cudnnSetConvolution2dDescriptor(convolution_descriptor, kern_dim / 2, kern_dim / 2, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
 
 	int out_spatial_dim = in_spatial_dim / stride;
 
@@ -1509,7 +1422,7 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	int returned_cnt;
 	cudnnConvolutionFwdAlgoPerf_t top_algo[1];
 	status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
-	cudnnConvolutionFwdAlgo_t convolution_algorithm = top_algo[0].algo;
+	cudnnConvolutionFwdAlgo_t convolution_algorithm = CUDNN_CONVOLUTION_FWD_ALGO_GEMM;
 
 	// const algo_t algos[] = {
     //       CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
@@ -1530,6 +1443,8 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 
 	const float alpha = 1, beta = 0;
 	status = cudnnConvolutionForward(trainer -> cudnnHandle, &alpha, input_descriptor, input, kernel_descriptor, weights, convolution_descriptor, convolution_algorithm, workspace, workspace_bytes, &beta, output_descriptor, output);
+
+	printf("%s\n", cudnnGetErrorString(status));
 
 	cudaFree(workspace);
 	cudnnDestroyTensorDescriptor(input_descriptor);
@@ -1559,7 +1474,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	cudnnCreateConvolutionDescriptor(&convolution_descriptor);
-	cudnnSetConvolution2dDescriptor(convolution_descriptor, kern_dim / 2, kern_dim / 2, stride, stride, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT);
+	cudnnSetConvolution2dDescriptor(convolution_descriptor, kern_dim / 2, kern_dim / 2, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
 
 	const float alpha = 1, beta = 0;
 
@@ -1837,7 +1752,6 @@ void forward_pass(Train_ResNet * trainer){
 
 	int print_size = 10;
 	printDeviceData("INIT CONV APPLIED", first_conv_output, print_size);
-
 
 	BatchNorm * norm_init_conv_params = trainer -> model -> params -> norm_init_conv;
 	Cache_BatchNorm * norm_init_conv_cache = trainer -> forward_buffer -> activations -> norm_init_conv;
@@ -2533,7 +2447,7 @@ void backwards_pass(Train_ResNet * trainer){
 	printDeviceData("INIT CONV WEIGHT DERIV", conv_weight_deriv, print_size);
 }
 
-void dump_parameters(int dump_id, Train_ResNet * trainer){
+void dump_parameters(int dump_id, Train_ResNet * trainer, const char * special_dir){
 
 	Params * model_params = trainer -> model -> params;
 	float ** model_params_locations = model_params -> locations;
@@ -2568,7 +2482,7 @@ void dump_parameters(int dump_id, Train_ResNet * trainer){
 
 		model_location = model_params_locations[i];
 		cudaMemcpy(cpu_param_buff, model_location, param_size * sizeof(float), cudaMemcpyDeviceToHost);
-		print_ret = asprintf(&model_params_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/model_params/%03d.buffer", dump_id, i);
+		print_ret = asprintf(&model_params_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/model_params/%03d.buffer", special_dir, dump_id, i);
 		fp = fopen(model_params_filepath, "wb");
 		n_read = fwrite(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		fclose(fp);
@@ -2577,7 +2491,7 @@ void dump_parameters(int dump_id, Train_ResNet * trainer){
 
 		grad_location = current_gradient_locations[i];
 		cudaMemcpy(cpu_param_buff, grad_location, param_size * sizeof(float), cudaMemcpyDeviceToHost);
-		print_ret = asprintf(&gradients_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/gradients/%03d.buffer", dump_id, i);
+		print_ret = asprintf(&gradients_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/gradients/%03d.buffer", special_dir, dump_id, i);
 		fp = fopen(gradients_filepath, "wb");
 		n_read = fwrite(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		fclose(fp);
@@ -2585,7 +2499,7 @@ void dump_parameters(int dump_id, Train_ResNet * trainer){
 
 		mean_location = prev_grad_means_locations[i];
 		cudaMemcpy(cpu_param_buff, mean_location, param_size * sizeof(float), cudaMemcpyDeviceToHost);
-		print_ret = asprintf(&means_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/means/%03d.buffer", dump_id, i);
+		print_ret = asprintf(&means_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/means/%03d.buffer", special_dir, dump_id, i);
 		fp = fopen(means_filepath, "wb");
 		n_read = fwrite(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		fclose(fp);
@@ -2593,7 +2507,7 @@ void dump_parameters(int dump_id, Train_ResNet * trainer){
 
 		var_location = prev_grad_vars_locations[i];
 		cudaMemcpy(cpu_param_buff, var_location, param_size * sizeof(float), cudaMemcpyDeviceToHost);
-		print_ret = asprintf(&vars_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/vars/%03d.buffer", dump_id, i);
+		print_ret = asprintf(&vars_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/vars/%03d.buffer", special_dir, dump_id, i);
 		fp = fopen(vars_filepath, "wb");
 		n_read = fwrite(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		fclose(fp);
@@ -2633,27 +2547,27 @@ void dump_batch_norm_cache(Train_ResNet * trainer, char * filepath, Cache_BatchN
 	free(filepath_new);
 }
 
-void dump_conv_block_activation(int dump_id, Train_ResNet * trainer, Activation_ConvBlock * activation_conv_block, int conv_block_ind, bool is_deriv){
+void dump_conv_block_activation(int dump_id, Train_ResNet * trainer, Activation_ConvBlock * activation_conv_block, int conv_block_ind, bool is_deriv, const char * special_dir){
 	FILE * fp;
 	int n_wrote, print_ret;
 
 	char * filepath = NULL;
 
 	if (is_deriv){
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/conv_blocks/%02d/", dump_id, conv_block_ind);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/conv_blocks/%02d/", special_dir, dump_id, conv_block_ind);
 	}
 	else{
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/conv_blocks/%02d/", dump_id, conv_block_ind);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/conv_blocks/%02d/", special_dir, dump_id, conv_block_ind);
 	}
 
 	char * filepath_dup = NULL;
 	
 	char * batchnorm_filepath = NULL;
 	if (is_deriv){
-		print_ret = asprintf(&batchnorm_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/batch_norms/%02d/", dump_id, conv_block_ind);
+		print_ret = asprintf(&batchnorm_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/batch_norms/%02d/", special_dir, dump_id, conv_block_ind);
 	}
 	else{
-		print_ret = asprintf(&batchnorm_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/batch_norms/%02d/", dump_id, conv_block_ind);
+		print_ret = asprintf(&batchnorm_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/batch_norms/%02d/", special_dir, dump_id, conv_block_ind);
 	}
 
 	char * batchnorm_filepath_dup = NULL; 
@@ -2798,7 +2712,7 @@ void dump_conv_block_activation(int dump_id, Train_ResNet * trainer, Activation_
 
 }
 
-void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activations, bool is_deriv){
+void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activations, bool is_deriv, const char * special_dir){
 
 	size_t batch_size = trainer -> batch_size;
 	Dims * dims = trainer -> model -> dims;
@@ -2812,7 +2726,7 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	if (!is_deriv){
 		float * cpu_images = (float *) malloc(input_size * sizeof(float));
 		cudaMemcpy(cpu_images, trainer -> cur_batch -> images, input_size * sizeof(float), cudaMemcpyDeviceToHost);
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/input.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/input.buffer", special_dir, dump_id);
 		fp = fopen(filepath, "wb");
 		n_wrote = fwrite(cpu_images, sizeof(float), input_size, fp);
 		fclose(fp);
@@ -2827,10 +2741,10 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	float * cpu_init_conv_applied = (float *) malloc(init_conv_applied_size * sizeof(float));
 	cudaMemcpy(cpu_init_conv_applied, activations -> init_conv_applied, init_conv_applied_size * sizeof(float), cudaMemcpyDeviceToHost);
 	if (is_deriv){
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/init_conv_applied.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/init_conv_applied.buffer", special_dir, dump_id);
 	}
 	else{
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/init_conv_applied.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/init_conv_applied.buffer", special_dir, dump_id);
 	}
 	fp = fopen(filepath, "wb");
 	n_wrote = fwrite(cpu_init_conv_applied, sizeof(float), init_conv_applied_size, fp);
@@ -2841,10 +2755,10 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 
 	/* 2. INIT BATCH NORM */
 	if (is_deriv){
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/batch_norms/init/", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/batch_norms/init/", special_dir, dump_id);
 	}
 	else{
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/batch_norms/init/", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/batch_norms/init/", special_dir, dump_id);
 	}
 
 	dump_batch_norm_cache(trainer, filepath, activations -> norm_init_conv);
@@ -2854,10 +2768,10 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	float * cpu_init_conv_activated = (float *) malloc(init_conv_applied_size * sizeof(float));
 	cudaMemcpy(cpu_init_conv_activated, activations -> init_conv_activated, init_conv_applied_size * sizeof(float), cudaMemcpyDeviceToHost);
 	if (is_deriv){
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/init_conv_activated.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/init_conv_activated.buffer", special_dir, dump_id);
 	}
 	else{
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/init_conv_activated.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/init_conv_activated.buffer", special_dir, dump_id);
 	}
 	fp = fopen(filepath, "wb");
 	n_wrote = fwrite(cpu_init_conv_activated, sizeof(float), init_conv_applied_size, fp);
@@ -2871,7 +2785,7 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	if (!is_deriv){
 		int * cpu_max_inds = (int *) malloc(maxpool_size * sizeof(int));
 		cudaMemcpy(cpu_max_inds, activations -> max_inds, maxpool_size * sizeof(int), cudaMemcpyDeviceToHost);
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/max_inds.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/max_inds.buffer", special_dir, dump_id);
 		fp = fopen(filepath, "wb");
 		n_wrote = fwrite(cpu_max_inds, sizeof(int), maxpool_size, fp);
 		fclose(fp);
@@ -2882,10 +2796,10 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	float * cpu_init_convblock_input = (float *) malloc(maxpool_size * sizeof(float));
 	cudaMemcpy(cpu_init_convblock_input, activations -> init_convblock_input, maxpool_size * sizeof(float), cudaMemcpyDeviceToHost);
 	if (is_deriv){
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/init_convblock_input.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/init_convblock_input.buffer", special_dir, dump_id);
 	}
 	else{
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/init_convblock_input.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/init_convblock_input.buffer", special_dir, dump_id);
 	}
 	fp = fopen(filepath, "wb");
 	n_wrote = fwrite(cpu_init_convblock_input, sizeof(float), maxpool_size, fp);
@@ -2900,7 +2814,7 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	Activation_ConvBlock * cur_conv_block;
 	for (int i = 0; i < n_conv_blocks; i++){
 		cur_conv_block = conv_blocks[i];
-		dump_conv_block_activation(dump_id, trainer, cur_conv_block, i, is_deriv);
+		dump_conv_block_activation(dump_id, trainer, cur_conv_block, i, is_deriv, special_dir);
 	}
 
 
@@ -2909,10 +2823,10 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	float * cpu_final_avg_pool = (float *) malloc(final_avg_pool_size * sizeof(float));
 	cudaMemcpy(cpu_final_avg_pool, activations -> final_conv_output_pooled, final_avg_pool_size * sizeof(float), cudaMemcpyDeviceToHost);
 	if (is_deriv){
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/final_avg_pool.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/final_avg_pool.buffer", special_dir, dump_id);
 	}
 	else{
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/final_avg_pool.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/final_avg_pool.buffer", special_dir, dump_id);
 	}
 	fp = fopen(filepath, "wb");
 	n_wrote = fwrite(cpu_final_avg_pool, sizeof(float), final_avg_pool_size, fp);
@@ -2925,10 +2839,10 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	float * cpu_linear_output = (float *) malloc(output_size * sizeof(float));
 	cudaMemcpy(cpu_linear_output, activations -> linear_output, output_size * sizeof(float), cudaMemcpyDeviceToHost);
 	if (is_deriv){
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/fc_output.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/fc_output.buffer", special_dir, dump_id);
 	}
 	else{
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/fc_output.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/fc_output.buffer", special_dir, dump_id);
 	}
 	fp = fopen(filepath, "wb");
 	n_wrote = fwrite(cpu_linear_output, sizeof(float), output_size, fp);
@@ -2941,11 +2855,11 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	float * cpu_softmax = (float *) malloc(output_size * sizeof(float));
 	if (is_deriv){
 		cudaMemcpy(cpu_softmax, trainer -> backprop_buffer -> output_layer_deriv, output_size * sizeof(float), cudaMemcpyDeviceToHost);
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activation_derivs/softmax.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activation_derivs/softmax.buffer", special_dir, dump_id);
 	}
 	else{
 		cudaMemcpy(cpu_softmax, trainer -> forward_buffer -> pred, output_size * sizeof(float), cudaMemcpyDeviceToHost);
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/softmax.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/softmax.buffer", special_dir, dump_id);
 	}
 	fp = fopen(filepath, "wb");
 	n_wrote = fwrite(cpu_softmax, sizeof(float), output_size, fp);
@@ -2957,7 +2871,7 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	/* 9. Correct Classes */
 	if (!is_deriv){
 		int * correct_classes_cpu = trainer -> cur_batch -> correct_classes_cpu;
-		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/activations/correct_classes.buffer", dump_id);
+		print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/activations/correct_classes.buffer", special_dir, dump_id);
 		fp = fopen(filepath, "wb");
 		n_wrote = fwrite(correct_classes_cpu, sizeof(int), batch_size, fp);
 		free(filepath);
@@ -2965,13 +2879,13 @@ void dump_activations(int dump_id, Train_ResNet * trainer, Activations * activat
 	}
 }
 
-void dump_trainer_meta(int dump_id, Train_ResNet * trainer){
+void dump_trainer_meta(int dump_id, Train_ResNet * trainer, const char * special_dir){
 
 	char * filepath = NULL;
 	FILE * fp;
 	int print_ret;
 
-	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/trainer_metadata.txt", dump_id);
+	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/trainer_metadata.txt", special_dir, dump_id);
 	fp = fopen(filepath, "w");
 
 	// DUMP THE BATCH INFO
@@ -3016,13 +2930,13 @@ void dump_trainer_meta(int dump_id, Train_ResNet * trainer){
 	fclose(fp);
 }
 
-void dump_trainer_checkpoint(int dump_id, Train_ResNet * trainer){
+void dump_trainer_checkpoint(int dump_id, Train_ResNet * trainer, const char * special_dir){
 
 	char * filepath = NULL;
 	FILE * fp;
 	int print_ret;
 
-	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/trainer_checkpoint.txt", dump_id);
+	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/trainer_checkpoint.txt", special_dir, dump_id);
 	fp = fopen(filepath, "w");
 
 	// DUMP THE BATCH INFO
@@ -3038,22 +2952,22 @@ void dump_trainer_checkpoint(int dump_id, Train_ResNet * trainer){
 	fclose(fp);
 }
 
-void dump_trainer(int dump_id, Train_ResNet * trainer){
+void dump_trainer(int dump_id, Train_ResNet * trainer, const char * special_dir){
 
 	/* DUMP PARAMETERS */
-	dump_parameters(dump_id, trainer);
+	dump_parameters(dump_id, trainer, special_dir);
 	
 	/* DUMP FORWARD ACTIVATIONS */
-	dump_activations(dump_id, trainer, trainer -> forward_buffer -> activations, false);
+	dump_activations(dump_id, trainer, trainer -> forward_buffer -> activations, false, special_dir);
 
 	/* DUMP BACKPROP ACTIVATION DERIVS */
-	dump_activations(dump_id, trainer, trainer -> backprop_buffer -> activation_derivs, true);
+	dump_activations(dump_id, trainer, trainer -> backprop_buffer -> activation_derivs, true, special_dir);
 
 	/* DUMP TRAINER METADATA */
-	dump_trainer_meta(dump_id, trainer);
+	dump_trainer_meta(dump_id, trainer, special_dir);
 
 	/* DUMP TRAINER CHECKPOINT */
-	dump_trainer_checkpoint(dump_id, trainer);
+	dump_trainer_checkpoint(dump_id, trainer, special_dir);
 
 }
 
@@ -3061,14 +2975,14 @@ void dump_trainer(int dump_id, Train_ResNet * trainer){
 
 // loading from a checkpoint that was dumped
 // ASSUME EVERYTHING IS THE SAME AS IN THIS FILE EXCEPT: cur_shard_id, cur_batch_in_shard, cur_mean_decay, cur_var_decay, cur_dump_id, cur_epoch
-void overwrite_trainer_hyperparams(Train_ResNet * trainer, int dump_id){
+void overwrite_trainer_hyperparams(Train_ResNet * trainer, int dump_id, const char * special_dir){
 
 	// open the metadata file with hyper params and location of training sequence
 	char * filepath = NULL;
 	FILE * fp;
 	int print_ret;
 
-	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/trainer_checkpoint.txt", dump_id);
+	print_ret = asprintf(&filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/trainer_checkpoint.txt", special_dir, dump_id);
 	fp = fopen(filepath, "r");
 
 	// read the metadata file
@@ -3104,7 +3018,7 @@ void overwrite_trainer_hyperparams(Train_ResNet * trainer, int dump_id){
 
 
 // LOADING THE MODEL PARAMS AND OPTIMIZATION STATES FROM CHECKPOINT
-void overwrite_model_params(Train_ResNet * trainer, int dump_id){
+void overwrite_model_params(Train_ResNet * trainer, int dump_id, const char * special_dir){
 
 	Params * model_params = trainer -> model -> params;
 	float ** model_params_locations = model_params -> locations;
@@ -3132,7 +3046,7 @@ void overwrite_model_params(Train_ResNet * trainer, int dump_id){
 		param_size = param_sizes[i];
 		cpu_param_buff = (float *) malloc(param_size * sizeof(float));
 
-		print_ret = asprintf(&model_params_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/model_params/%03d.buffer", dump_id, i);
+		print_ret = asprintf(&model_params_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/model_params/%03d.buffer", special_dir, dump_id, i);
 		fp = fopen(model_params_filepath, "rb");
 		n_read = fread(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		model_location = model_params_locations[i];
@@ -3140,7 +3054,7 @@ void overwrite_model_params(Train_ResNet * trainer, int dump_id){
 		fclose(fp);
 		free(model_params_filepath);
 
-		print_ret = asprintf(&means_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/means/%03d.buffer", dump_id, i);
+		print_ret = asprintf(&means_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/means/%03d.buffer", special_dir, dump_id, i);
 		fp = fopen(means_filepath, "rb");
 		n_read = fread(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		mean_location = prev_grad_means_locations[i];
@@ -3148,7 +3062,7 @@ void overwrite_model_params(Train_ResNet * trainer, int dump_id){
 		fclose(fp);
 		free(means_filepath);
 
-		print_ret = asprintf(&vars_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%08d/vars/%03d.buffer", dump_id, i);
+		print_ret = asprintf(&vars_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/%08d/vars/%03d.buffer", special_dir, dump_id, i);
 		fp = fopen(vars_filepath, "rb");
 		n_read = fread(cpu_param_buff, sizeof(float), (size_t) param_size, fp);
 		var_location = prev_grad_vars_locations[i];
@@ -3181,7 +3095,7 @@ void check_errors(Train_ResNet * trainer, int param_size, float * model_location
 				|| (isinf(cpu_param_model[i])) || (isinf(cpu_param_grad[i])) || (isinf(cpu_param_mean[i])) || (isinf(cpu_param_var[i]))){
 			printf("ERROR: nan or inf found at location: %d\n", location_ind);
 			printf("Dumping data to id=99999999 and exiting...\n");
-			dump_trainer(99999999, trainer);
+			dump_trainer(99999999, trainer, trainer -> dump_dir);
 			exit(1);
 		}
 	}
@@ -3230,9 +3144,9 @@ void update_parameters(Train_ResNet * trainer){
 	// also dump when nan or inf occurs (data dumped to id=99999999)
 	int cur_dump_id = trainer -> cur_dump_id;
 
-	if (cur_dump_id % 1000 == 0){
+	if (cur_dump_id < 1000){
 		printf("DUMPING TRAINER...!\n\n");
-		dump_trainer(cur_dump_id, trainer);
+		dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
 	}
 	
 	for (int i = n_locations - 1; i >= 0; i--){
@@ -3580,15 +3494,18 @@ int main(int argc, char *argv[]) {
 	cudnnHandle_t cudnn;
 	cudnnCreate(&cudnn);
 
+	const char * MY_DUMP_DIR = "cudnn_test";
 
-	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS, &cudnn);
+	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS, &cudnn, MY_DUMP_DIR);
 
 	// OVERRIDE IF LOADING WEIGHTS
 	int LOAD_FROM_DUMP_ID = -1;
+
+	
 	
 	if (LOAD_FROM_DUMP_ID != -1){
-		overwrite_trainer_hyperparams(trainer, LOAD_FROM_DUMP_ID);
-		overwrite_model_params(trainer, LOAD_FROM_DUMP_ID);
+		overwrite_trainer_hyperparams(trainer, LOAD_FROM_DUMP_ID, MY_DUMP_DIR);
+		overwrite_model_params(trainer, LOAD_FROM_DUMP_ID, MY_DUMP_DIR);
 	}
 
 	/* PERFORM TRAINING */
@@ -3606,8 +3523,10 @@ int main(int argc, char *argv[]) {
 
 	cudaError_t status;
 
-	char * LOSS_FILENAME = (char *) "/mnt/storage/data/vision/imagenet/training_dumps/avg_loss_log.txt";
-	FILE * loss_file = fopen(LOSS_FILENAME, "w");
+	char * loss_filepath = NULL;
+	int print_ret;
+	print_ret = asprintf(&loss_filepath, "/mnt/storage/data/vision/imagenet/training_dumps/%s/avg_loss_log.txt", MY_DUMP_DIR);
+	FILE * loss_file = fopen(loss_filepath, "w");
 
 	// if this was loaded from checkpoint
 	int cur_epoch = trainer -> cur_epoch;
@@ -3708,7 +3627,7 @@ int main(int argc, char *argv[]) {
 
 	// DO A FINAL DUMP AFTER MODEL FINISHES (stored at 77777777)
 	int FINAL_DUMP_ID = 77777777;
-	dump_trainer(FINAL_DUMP_ID, trainer);
+	dump_trainer(FINAL_DUMP_ID, trainer, trainer -> dump_dir);
 
 	fclose(loss_file);
 
