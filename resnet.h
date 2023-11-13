@@ -211,6 +211,7 @@ typedef struct {
 	float * loss_per_epoch;
 	float * accuracy_per_epoch;
 	int init_loaded;
+	const char * dump_dir;
 } Train_ResNet;
 
 
