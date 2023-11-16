@@ -2014,6 +2014,9 @@ void backwards_pass(Train_ResNet * trainer){
 		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_expanded;
 		cur_batch_norm_cache_derivs = cur_conv_block_activation_derivs -> norm_post_expanded;
 
+		size_t cur_bn_inp_size = cur_batch_norm_cache -> input_size;
+		size_t cur_bn_feature_size = cur_batch_norm_cache -> feature_size;
+
 		// fill in details about backprop I/O
 		// dL/dBN_Output (given)
 		bn_out_layer_deriv = cur_conv_block_activation_derivs -> output;
@@ -2026,7 +2029,6 @@ void backwards_pass(Train_ResNet * trainer){
 		
 		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, false);
-
 		printDeviceData("CONV BLOCK OUTPUT ACTIVATION & NORM DERIV", bn_input_deriv, print_size);
 
 		// CONVOLUTION DIMENSIONS
@@ -2073,9 +2075,10 @@ void backwards_pass(Train_ResNet * trainer){
 		bn_input = cur_conv_block_activation -> post_spatial;
 		// activated output of batch norm layer from forward pass
 		bn_activated = cur_conv_block_activation -> post_spatial_activated;
-		
-		prepareAndDoActivationAndBatchNormDeriv(cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs, cur_batch_norm_cache_derivs,
-																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
+
+		size_t bn_size = cur_batch_norm_cache -> input_size;
+		float * cpu_out_deriv = (float *) malloc(bn_size * sizeof(float));
+		cudaMemcpy(cpu_out_deriv, bn_out_layer_deriv, bn_size * sizeof(float), cudaMemcpyDeviceToHost);
 
 		printDeviceData("SPATIAL ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 

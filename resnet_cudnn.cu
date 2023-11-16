@@ -967,7 +967,9 @@ Cache_BatchNorm * init_cache_batchnorm(int input_size, int feature_size){
 
 	float * means, *inv_vars;
 	cudaMalloc(&means, feature_size * sizeof(float));
+	cudaMemset(means, 0, feature_size * sizeof(float));
 	cudaMalloc(&inv_vars, feature_size * sizeof(float));
+	cudaMemset(inv_vars, 0, feature_size * sizeof(float));
 
 	cache_batchnorm -> means = means;
 	cache_batchnorm -> inv_vars = inv_vars;
@@ -1377,7 +1379,6 @@ Class_Metadata * populate_class_info(char * label_filename, char * synset_filena
 	return classes;
 }
 
-
 /* PREP AND LAUNCHING CUDA KERNELS! */
 
 void prepareAndDoConvolutionScratch(int in_spatial_dim, int kern_dim, int in_filters, int out_filters,  int stride, int batch_size, 
@@ -1420,8 +1421,8 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	// cudnnGetConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convolution_algorithm);
 
 	int returned_cnt;
-	cudnnConvolutionFwdAlgoPerf_t top_algo[1];
-	status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
+	//cudnnConvolutionFwdAlgoPerf_t top_algo[1];
+	//status = cudnnGetConvolutionForwardAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, 1, &returned_cnt, top_algo);
 	cudnnConvolutionFwdAlgo_t convolution_algorithm = CUDNN_CONVOLUTION_FWD_ALGO_GEMM;
 
 	// const algo_t algos[] = {
@@ -1457,6 +1458,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 	int out_spatial_dim = in_spatial_dim / stride;
 
+	cudnnStatus_t status;
 
 	cudnnTensorDescriptor_t input_descriptor;
 	cudnnCreateTensorDescriptor(&input_descriptor);
@@ -1466,15 +1468,26 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 	cudnnCreateTensorDescriptor(&output_descriptor);
 	cudnnSetTensor4dDescriptor(output_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, out_filters, out_spatial_dim, out_spatial_dim);
 
-	cudnnFilterDescriptor_t kernel_descriptor;
-	cudnnCreateFilterDescriptor(&kernel_descriptor);
-	cudnnSetFilter4dDescriptor(kernel_descriptor, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, out_filters, in_filters, kern_dim, kern_dim);
+	cudnnFilterDescriptor_t kernel_descriptor_nchw;
+	cudnnCreateFilterDescriptor(&kernel_descriptor_nchw);
+	cudnnSetFilter4dDescriptor(kernel_descriptor_nchw, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, out_filters, in_filters, kern_dim, kern_dim);
+
+	cudnnFilterDescriptor_t kernel_descriptor_nhwc;
+	cudnnCreateFilterDescriptor(&kernel_descriptor_nhwc);
+	cudnnSetFilter4dDescriptor(kernel_descriptor_nhwc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NHWC, out_filters, in_filters, kern_dim, kern_dim);
+
+	// used to convert kernel weights to same format as tensors (needed for cudnn conv functions)
+	cudnnTensorTransformDescriptor_t transform_descriptor;
+	cudnnCreateTensorTransformDescriptor(&transform_descriptor);
+	cudnnSetTensorTransformDescriptor(transform_descriptor, 4, CUDNN_TENSOR_NHWC, NULL, NULL, NULL, CUDNN_TRANSFORM_UNFOLD);
 
 	cudnnConvolutionDescriptor_t convolution_descriptor;
 	cudnnCreateConvolutionDescriptor(&convolution_descriptor);
 	cudnnSetConvolution2dDescriptor(convolution_descriptor, kern_dim / 2, kern_dim / 2, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
 
-	const float alpha = 1, beta = 0;
+	const float a_dummy = 1, b_dummy = 0;
+
+	float alpha = 1, beta = 0;
 
 	int returned_cnt;
 
@@ -1492,19 +1505,48 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
          // CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED
      	 // };
 
-		cudnnConvolutionBwdDataAlgoPerf_t top_data_algo[1];
-		cudnnGetConvolutionBackwardDataAlgorithm_v7(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, 1, &returned_cnt, top_data_algo);
-		cudnnConvolutionBwdDataAlgo_t convolution_data_algorithm = top_data_algo[0].algo;
+		//cudnnConvolutionBwdDataAlgoPerf_t top_data_algo[1];
+		//cudnnGetConvolutionBackwardDataAlgorithm_v7(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, 1, &returned_cnt, top_data_algo);
+		cudnnConvolutionBwdDataAlgo_t convolution_data_algorithm = CUDNN_CONVOLUTION_BWD_DATA_ALGO_1;
 		
-		cudnnGetConvolutionBackwardDataWorkspaceSize(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, convolution_data_algorithm, &workspace_bytes);
+		status = cudnnGetConvolutionBackwardDataWorkspaceSize(trainer -> cudnnHandle, kernel_descriptor_nhwc, output_descriptor, convolution_descriptor, input_descriptor, convolution_data_algorithm, &workspace_bytes);
+		// printf("Back Data Workspace Bytes Status: %s\n", cudnnGetErrorString(status));
 
 		void * workspace_data;
 		cudaMalloc(&workspace_data, workspace_bytes);
 
-		cudnnConvolutionBackwardData(trainer -> cudnnHandle, &alpha, kernel_descriptor, weights, output_descriptor, out_deriv, convolution_descriptor, convolution_data_algorithm, 
+
+		float * weights_trans;
+		cudaMalloc(&weights_trans, in_filters * out_filters * kern_dim * kern_dim * sizeof(float));
+
+		cudnnTransformFilter(trainer -> cudnnHandle, transform_descriptor, &a_dummy, kernel_descriptor_nchw, weights, &b_dummy, kernel_descriptor_nhwc, weights_trans);
+
+
+		if (toAdd){
+			beta = 1;
+		}
+
+		status = cudnnConvolutionBackwardData(trainer -> cudnnHandle, &alpha, kernel_descriptor_nhwc, weights_trans, output_descriptor, out_deriv, convolution_descriptor, convolution_data_algorithm, 
 										workspace_data, workspace_bytes, &beta, input_descriptor, input_deriv);
-	
+		// printf("Back Data Algo Status: %s\n", cudnnGetErrorString(status));
+
+
+
+		// float * inp_deriv_cpu = (float *) malloc(in_filters * batch_size * in_spatial_dim * in_spatial_dim * sizeof(float));
+		// cudaMemcpy(inp_deriv_cpu, input_deriv, in_filters * batch_size * in_spatial_dim * in_spatial_dim * sizeof(float), cudaMemcpyDeviceToHost);
+
+		// int all_zero = 1;
+		// for (size_t i = 0; i < in_filters * out_filters * kern_dim * kern_dim; i++){
+		// 	if (inp_deriv_cpu[i] != 0){
+		// 		all_zero = 0;
+		// 		break;
+		// 	}
+		// }
+
+		// printf("All Zero Inp Deriv?: %d\n", all_zero);
+		
 		cudaFree(workspace_data);
+		cudaFree(weights_trans);
 		workspace_bytes = 0;
 	}
 
@@ -1519,23 +1561,56 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 
 	// Compute deriv w.r.t filter weights
-	cudnnConvolutionBwdFilterAlgoPerf_t top_filter_algo[1];
-	cudnnGetConvolutionBackwardFilterAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, 1, &returned_cnt, top_filter_algo);
-	cudnnConvolutionBwdFilterAlgo_t convolution_filter_algorithm = top_filter_algo[0].algo;
+	//cudnnConvolutionBwdFilterAlgoPerf_t top_filter_algo[1];
+	//cudnnGetConvolutionBackwardFilterAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, 1, &returned_cnt, top_filter_algo);
+	cudnnConvolutionBwdFilterAlgo_t convolution_filter_algorithm = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1;
 
-	cudnnGetConvolutionBackwardFilterWorkspaceSize(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, convolution_filter_algorithm, &workspace_bytes);
+	cudnnStatus_t status_bytes = cudnnGetConvolutionBackwardFilterWorkspaceSize(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor_nhwc, convolution_filter_algorithm, &workspace_bytes);
+
 
 	void * workspace_filter;
 	cudaMalloc(&workspace_filter, workspace_bytes);
 
-	cudnnConvolutionBackwardFilter(trainer -> cudnnHandle, &alpha, input_descriptor, input, output_descriptor, out_deriv, convolution_descriptor, convolution_filter_algorithm, 
-									workspace_filter, workspace_bytes, &beta, kernel_descriptor, weight_deriv);
+	// printf("Filter Workspace Bytes: %zu\n", workspace_bytes);
+	// printf("Workspace Bytes Status: %s\n", cudnnGetErrorString(status_bytes));
+
+	beta = 0;
+
+	float * weight_deriv_temp;
+	cudaMalloc(&weight_deriv_temp, out_filters * in_filters * kern_dim * kern_dim * sizeof(float));
+
+	status = cudnnConvolutionBackwardFilter(trainer -> cudnnHandle, &alpha, input_descriptor, input, output_descriptor, out_deriv, convolution_descriptor, convolution_filter_algorithm, 
+									workspace_filter, workspace_bytes, &beta, kernel_descriptor_nhwc, weight_deriv_temp);
+	// printf("Back Filt Algo Status: %s\n", cudnnGetErrorString(status));
+	
+
+	cudnnTransformFilter(trainer -> cudnnHandle, transform_descriptor, &a_dummy, kernel_descriptor_nhwc, weight_deriv_temp, &b_dummy, kernel_descriptor_nchw, weight_deriv);
+	
+	cudaFree(weight_deriv_temp);
+	
+	// float * w_deriv_cpu = (float *) malloc(in_filters * out_filters * kern_dim * kern_dim * sizeof(float));
+	// cudaMemcpy(w_deriv_cpu, weight_deriv, in_filters * out_filters * kern_dim * kern_dim * sizeof(float), cudaMemcpyDeviceToHost);
+
+	// int all_zero_w = 1;
+	// for (size_t i = 0; i < in_filters * out_filters * kern_dim * kern_dim; i++){
+	// 	if (w_deriv_cpu[i] != 0){
+	// 		all_zero_w = 0;
+	// 		break;
+	// 	}
+	// }
+
+	// printf("All Zero Weight Deriv?: %d\n", all_zero_w);
+
+	// status = cudaGetLastError();
+	// printf("Status after backward conv weight deriv: %s\n\n", cudaGetErrorString(status));
 
 	cudaFree(workspace_filter);
 	cudnnDestroyTensorDescriptor(input_descriptor);
 	cudnnDestroyTensorDescriptor(output_descriptor);
-	cudnnDestroyFilterDescriptor(kernel_descriptor);
+	cudnnDestroyFilterDescriptor(kernel_descriptor_nchw);
+	cudnnDestroyFilterDescriptor(kernel_descriptor_nhwc);
 	cudnnDestroyConvolutionDescriptor(convolution_descriptor);
+	cudnnDestroyTensorTransformDescriptor(transform_descriptor);
 }
 
 
@@ -1591,7 +1666,7 @@ void prepareAndDoBatchNormAndActivate(Train_ResNet * trainer, BatchNorm * batch_
 	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
-	cudnnBatchNormMode_t bn_mode = CUDNN_BATCHNORM_SPATIAL;
+	cudnnBatchNormMode_t bn_mode = CUDNN_BATCHNORM_SPATIAL_PERSISTENT;
 
 	cudnnDeriveBNTensorDescriptor(bn_descriptor, input_descriptor, bn_mode);
 
@@ -1644,9 +1719,10 @@ void prepareAndDoActivationAndBatchNormDeriv(Train_ResNet * trainer, BatchNorm *
 	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
-	cudnnBatchNormMode_t bn_mode = CUDNN_BATCHNORM_SPATIAL;
+	cudnnBatchNormMode_t bn_mode = CUDNN_BATCHNORM_SPATIAL_PERSISTENT;
 
 	cudnnDeriveBNTensorDescriptor(bn_descriptor, layer_descriptor, bn_mode);
+
 
 	cudnnBatchNormalizationBackward(trainer -> cudnnHandle, bn_mode, &alpha_data, &beta_data, &alpha_param, &beta_param, 
 											layer_descriptor, input, layer_descriptor, out_layer_deriv, layer_descriptor, input_deriv,
@@ -2210,10 +2286,15 @@ void backwards_pass(Train_ResNet * trainer){
 
 		// update the current batch norm layer pointers
 		cur_batch_norm_params = cur_conv_block_params -> norm_expansion;
+		
+		
 		cur_batch_norm_param_derivs = cur_conv_block_param_derivs -> norm_expansion;
 
 		cur_batch_norm_cache = cur_conv_block_activation -> norm_post_expanded;
 		cur_batch_norm_cache_derivs = cur_conv_block_activation_derivs -> norm_post_expanded;
+
+		size_t cur_bn_inp_size = cur_batch_norm_cache -> input_size;
+		size_t cur_bn_feature_size = cur_batch_norm_cache -> feature_size;
 
 		// fill in details about backprop I/O
 		// dL/dBN_Output (given)
@@ -2299,6 +2380,8 @@ void backwards_pass(Train_ResNet * trainer){
 		// because residual
 		conv_input_deriv = cur_conv_block_activation_derivs -> post_reduced_activated;
 		conv_weight_deriv = cur_conv_block_param_derivs -> spatial;
+
+		
 
 		prepreAndDoConvolutionDeriv(trainer, in_spatial_dim, kern_dim, in_filters, out_filters, stride, batch_size, false,
 													conv_input, conv_weight, conv_out_deriv,
@@ -3474,7 +3557,7 @@ int main(int argc, char *argv[]) {
 	// given when we generated shards...
 	int SHARD_N_IMAGES = 32768;
 
-	int BATCH_SIZE = 32;
+	int BATCH_SIZE = 64;
 	// dimensions of INPUT_DIM X INPUT_DIM x 3 color channels
 	int IMAGE_SIZE = INPUT_DIM * INPUT_DIM * 3;
 	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE, INPUT_DIM, SHARD_N_IMAGES);
@@ -3490,7 +3573,9 @@ int main(int argc, char *argv[]) {
 
 	// INIT Cudnn
 	cudnnHandle_t cudnn;
-	cudnnCreate(&cudnn);
+	cudnnStatus_t cudnn_status = cudnnCreate(&cudnn);
+	//printf("Create Status: %s\n\n", cudnnGetErrorString(cudnn_status));
+
 
 	const char * MY_DUMP_DIR = "cudnn_test";
 
@@ -3538,75 +3623,82 @@ int main(int argc, char *argv[]) {
 			printf("************\n");
 
 			/* LOAD NEW BATCH */
-			printf("Loading Batch...\n");
+			printf("Loading Batch...: %d\n", iter);
 			// values go into trainer -> cur_batch -> [images_cpu|images_float_cpu|images|correct_classes_cpu|correct_classes]
 			load_new_batch(trainer, class_metadata, trainer -> cur_batch);
 
-			cudaDeviceSynchronize();
-			status = cudaGetLastError();
+			// cudaDeviceSynchronize();
+			// status = cudaGetLastError();
 			//printf("Status after loading batch: %s\n\n", cudaGetErrorString(status));
 			
 
 			/* DO FORWARD PROP */
 			// final predictions go into trainer -> forward_buffer -> [pred|pred_cpu|prediction_label]
-			printf("Making Predictions...\n");
+			//printf("Making Predictions...\n");
 			forward_pass(trainer);
 
-			cudaDeviceSynchronize();
-			status = cudaGetLastError();
+			//cudaDeviceSynchronize();
+			//status = cudaGetLastError();
 			//printf("Status after forward pass: %s\n\n", cudaGetErrorString(status));
 			
 
 			/* RECORD LOSS AND ACCURACY */
+			if (iter % 100 == 0){
+				cudaDeviceSynchronize();
 
-			// dimensions of pred: (BATCH_SIZE, N_CLASSES)
-			pred = trainer -> forward_buffer -> pred_cpu;
-			correct = trainer -> cur_batch -> correct_classes_cpu;
-			
-			// loss
-			batch_loss = 0;
-			for (int s = 0; s < BATCH_SIZE; s++){
-				batch_loss += -1 * logf(pred[s * N_CLASSES + correct[s]]);
-			}
-			avg_batch_loss = batch_loss / BATCH_SIZE;
-			epoch_loss += batch_loss;
+				// dimensions of pred: (BATCH_SIZE, N_CLASSES)
+				pred = trainer -> forward_buffer -> pred_cpu;
+				correct = trainer -> cur_batch -> correct_classes_cpu;
+				
+				// loss
+				batch_loss = 0;
+				for (int s = 0; s < BATCH_SIZE; s++){
+					batch_loss += -1 * logf(pred[s * N_CLASSES + correct[s]]);
+				}
+				avg_batch_loss = batch_loss / BATCH_SIZE;
+				epoch_loss += batch_loss;
 
-			// accuracy
-			batch_n_wrong = 0;
-			for (int s = 0; s < BATCH_SIZE; s++){
-				val_pred_correct = pred[s * N_CLASSES + correct[s]];
-				for (int c = 0; c < N_CLASSES; c++){
-					if ((c != correct[s]) && (pred[s * N_CLASSES + c] >= val_pred_correct)){
-						batch_n_wrong++;
-						break;
+				// accuracy
+				batch_n_wrong = 0;
+				for (int s = 0; s < BATCH_SIZE; s++){
+					val_pred_correct = pred[s * N_CLASSES + correct[s]];
+					for (int c = 0; c < N_CLASSES; c++){
+						if ((c != correct[s]) && (pred[s * N_CLASSES + c] >= val_pred_correct)){
+							batch_n_wrong++;
+							break;
+						}
 					}
 				}
-			}
-			epoch_n_wrong += batch_n_wrong;
-			batch_accuracy = 100 * ((float) BATCH_SIZE - batch_n_wrong) / ((float) BATCH_SIZE);
+				epoch_n_wrong += batch_n_wrong;
+				batch_accuracy = 100 * ((float) BATCH_SIZE - batch_n_wrong) / ((float) BATCH_SIZE);
 
-			if (iter % PRINT_FREQ == 0){
-				printf("\nEpoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.2f%%\n\n", epoch, iter, avg_batch_loss, batch_accuracy);
+
+				if (iter % PRINT_FREQ == 0){
+					printf("\nEpoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.2f%%\n\n", epoch, iter, avg_batch_loss, batch_accuracy);
+				}
+				fprintf(loss_file, "%.4f\n", avg_batch_loss);
+				fflush(loss_file);
 			}
-			fprintf(loss_file, "%.4f\n", avg_batch_loss);
-			fflush(loss_file);
 
 
 			/* DO BACKPROP */
-			printf("Backprop to Compute Derivs...\n");
+			//printf("Backprop to Compute Derivs...\n");
 			backwards_pass(trainer);
 
-			cudaDeviceSynchronize();
-			status = cudaGetLastError();
+			//cudaDeviceSynchronize();
+			//status = cudaGetLastError();
 			//printf("Status after backwards pass: %s\n\n", cudaGetErrorString(status));
 
 			/* OPTIMIZE WEIGHTS */
-			printf("Applying Optimizer to Update Params...\n\n");
+			//printf("Applying Optimizer to Update Params...\n\n");
 			update_parameters(trainer);
 
-			cudaDeviceSynchronize();
+			/*cudaDeviceSynchronize();
 			status = cudaGetLastError();
-			//printf("Status after updating params: %s\n\n", cudaGetErrorString(status));
+			if (status != 0){
+				printf("Status after iter: %s\n\n", cudaGetErrorString(status));
+			}
+			*/
 
 		}
 
