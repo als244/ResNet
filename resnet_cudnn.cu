@@ -569,12 +569,18 @@ __global__ void doActivationDeriv(int size, float *input, float * upstream_deriv
 __global__ void softMax(const float * X, int batch_size, int output_len, float * out){
   int i = threadIdx.x;
   if (i < batch_size){
+  	float max = X[i * output_len];
+  	for (int j = 0; j < output_len; j++){
+  		if (X[i * output_len + j] > max){
+  			max = X[i * output_len + j];
+  		}
+  	}
     float sum = 0;
     for (int j = 0; j < output_len; j++){
-      sum += expf(X[i * output_len + j]);
+      sum += expf(X[i * output_len + j] - max);
     }
     for (int j = 0; j < output_len; j++){
-      out[i * output_len + j] = expf(X[i * output_len + j]) / sum;
+      out[i * output_len + j] = expf(X[i * output_len + j] - max) / sum;
     }
   }
 }
@@ -3226,7 +3232,7 @@ void update_parameters(Train_ResNet * trainer){
 	int cur_dump_id = trainer -> cur_dump_id;
 
 	if (cur_dump_id % 1000 == 0){
-		printf("DUMPING TRAINER...!\n\n");
+		printf("DUMPING TRAINER @ ID: %d!\n\n", cur_dump_id);
 		dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
 	}
 	
@@ -3564,7 +3570,7 @@ int main(int argc, char *argv[]) {
 
 
 	// General Training Structure (holds hyperparameters and pointers to structs which have network values)
-	float LEARNING_RATE = 0.0001;
+	float LEARNING_RATE = 0.001;
 	float WEIGHT_DECAY = 0;
 	float MEAN_DECAY = 0.9;
 	float VAR_DECAY = 0.999;
@@ -3582,7 +3588,7 @@ int main(int argc, char *argv[]) {
 	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS, &cudnn, MY_DUMP_DIR);
 
 	// OVERRIDE IF LOADING WEIGHTS
-	int LOAD_FROM_DUMP_ID = -1;
+	int LOAD_FROM_DUMP_ID = 88000;
 
 	
 	
@@ -3620,10 +3626,10 @@ int main(int argc, char *argv[]) {
 		epoch_n_wrong = 0;
 		for (int iter = cur_iter_in_epoch; iter < iterations_per_epoch; iter++){
 
-			printf("************\n");
+			//printf("************\n");
 
 			/* LOAD NEW BATCH */
-			printf("Loading Batch...: %d\n", iter);
+			//printf("Loading Batch...: %d\n", iter);
 			// values go into trainer -> cur_batch -> [images_cpu|images_float_cpu|images|correct_classes_cpu|correct_classes]
 			load_new_batch(trainer, class_metadata, trainer -> cur_batch);
 
@@ -3643,7 +3649,7 @@ int main(int argc, char *argv[]) {
 			
 
 			/* RECORD LOSS AND ACCURACY */
-			if (iter % 100 == 0){
+			if (iter % 1 == 0){
 				cudaDeviceSynchronize();
 
 				// dimensions of pred: (BATCH_SIZE, N_CLASSES)
@@ -3674,7 +3680,7 @@ int main(int argc, char *argv[]) {
 
 
 				if (iter % PRINT_FREQ == 0){
-					printf("\nEpoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.2f%%\n\n", epoch, iter, avg_batch_loss, batch_accuracy);
+					printf("Epoch: %d, Batch: %d ----- Avg. Loss: %.4f, Accuracy: %.2f%%\n", epoch, iter, avg_batch_loss, batch_accuracy);
 				}
 				fprintf(loss_file, "%.4f\n", avg_batch_loss);
 				fflush(loss_file);
@@ -3705,6 +3711,8 @@ int main(int argc, char *argv[]) {
 		(trainer -> loss_per_epoch)[epoch] = epoch_loss;
 		epoch_accuracy = (total_images_per_epoch - epoch_n_wrong) / total_images_per_epoch;
 		(trainer -> accuracy_per_epoch)[epoch] = epoch_accuracy;
+		printf("\nEpoch %d, Total Loss: %f\n", epoch, epoch_loss);
+		printf("Epoch %d, Total Accuracy: %f\n\n", epoch, epoch_accuracy);
 
 		// reset batch to start from beginning of dataset
 		trainer -> cur_batch -> cur_shard_id = -1;
