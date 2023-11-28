@@ -1267,7 +1267,7 @@ void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Bat
 	
 	int batch_size = batch_buffer -> n_images;
 	int image_size = batch_buffer -> image_size;
-	size_t total_pixels = (size_t) batch_size * (size_t) image_size;
+	
 	
 	float * full_shard_images = batch_buffer -> full_shard_images;
 	int * full_shard_correct_classes = batch_buffer -> full_shard_correct_classes;	
@@ -1289,8 +1289,11 @@ void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Bat
 
 
 	int start_img_num = cur_batch_in_shard * batch_size;
+
 	int n_read;
 	int print_ret;
+
+	size_t total_pixels = (size_t) batch_size * (size_t) image_size;
 
 	char * shard_images_filepath, * shard_labels_filepath;
 	// cur_shard_id = -1 implies first iteration
@@ -1474,6 +1477,8 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	void * workspace;
 	cudaMalloc(&workspace, workspace_bytes);
 
+	//printf("Forward Workspace Bytes: %zu\n", workspace_bytes);
+
 	const float alpha = 1, beta = 0;
 	status = cudnnConvolutionForward(trainer -> cudnnHandle, &alpha, input_descriptor, input, kernel_descriptor, weights, convolution_descriptor, convolution_algorithm, workspace, workspace_bytes, &beta, output_descriptor, output);
 
@@ -1546,6 +1551,7 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 		void * workspace_data;
 		cudaMalloc(&workspace_data, workspace_bytes);
+		//printf("Backward Data Workspace Bytes: %zu\n", workspace_bytes);
 
 
 		float * weights_trans;
@@ -1602,6 +1608,8 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 	void * workspace_filter;
 	cudaMalloc(&workspace_filter, workspace_bytes);
+
+	//printf("Backward Filter Workspace Bytes: %zu\n", workspace_bytes);
 
 	// printf("Filter Workspace Bytes: %zu\n", workspace_bytes);
 	// printf("Workspace Bytes Status: %s\n", cudnnGetErrorString(status_bytes));
@@ -1695,6 +1703,16 @@ void prepareAndDoBatchNormAndActivate(Train_ResNet * trainer, BatchNorm * batch_
 	cudnnCreateTensorDescriptor(&input_descriptor);
 	cudnnSetTensor4dDescriptor(input_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, filters, spatial_dim, spatial_dim);
 
+	cudnnTensorDescriptor_t input_descriptor_nchw;
+	cudnnCreateTensorDescriptor(&input_descriptor_nchw);
+	cudnnSetTensor4dDescriptor(input_descriptor_nchw, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, batch_size, filters, spatial_dim, spatial_dim);
+
+	float * input_nchw, * output_nchw;
+	cudaMalloc(&input_nchw, spatial_dim * spatial_dim * filters * batch_size * sizeof(float));
+	cudaMalloc(&output_nchw, spatial_dim * spatial_dim * filters * batch_size * sizeof(float));
+
+	cudnnTransformTensor(trainer -> cudnnHandle, &alpha_dummy, input_descriptor, input, &beta_dummy, input_descriptor_nchw, input_nchw);
+
 	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
@@ -1702,9 +1720,14 @@ void prepareAndDoBatchNormAndActivate(Train_ResNet * trainer, BatchNorm * batch_
 
 	cudnnDeriveBNTensorDescriptor(bn_descriptor, input_descriptor, bn_mode);
 
-	cudnnBatchNormalizationForwardTraining(trainer -> cudnnHandle, bn_mode, &alpha_dummy, &beta_dummy, input_descriptor, input, input_descriptor, output, bn_descriptor, gamma, beta, 1, NULL, NULL, trainer -> eps, means_out, inv_vars_out);
+	cudnnBatchNormalizationForwardTraining(trainer -> cudnnHandle, bn_mode, &alpha_dummy, &beta_dummy, input_descriptor_nchw, input_nchw, input_descriptor_nchw, output_nchw, bn_descriptor, gamma, beta, 1, NULL, NULL, trainer -> eps, means_out, inv_vars_out);
 
+	cudnnTransformTensor(trainer -> cudnnHandle, &alpha_dummy, input_descriptor_nchw, output_nchw, &beta_dummy, input_descriptor, output);
+
+	cudaFree(input_nchw);
+	cudaFree(output_nchw);
 	cudnnDestroyTensorDescriptor(input_descriptor);
+	cudnnDestroyTensorDescriptor(input_descriptor_nchw);
 	cudnnDestroyTensorDescriptor(bn_descriptor);
 
 	if (to_activate){
@@ -1748,6 +1771,10 @@ void prepareAndDoActivationAndBatchNormDeriv(Train_ResNet * trainer, BatchNorm *
 	cudnnCreateTensorDescriptor(&layer_descriptor);
 	cudnnSetTensor4dDescriptor(layer_descriptor, CUDNN_TENSOR_NHWC, CUDNN_DATA_FLOAT, batch_size, filters, spatial_dim, spatial_dim);
 
+	cudnnTensorDescriptor_t layer_descriptor_nchw;
+	cudnnCreateTensorDescriptor(&layer_descriptor_nchw);
+	cudnnSetTensor4dDescriptor(layer_descriptor_nchw, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, batch_size, filters, spatial_dim, spatial_dim);
+
 	cudnnTensorDescriptor_t bn_descriptor;
 	cudnnCreateTensorDescriptor(&bn_descriptor);
 
@@ -1755,12 +1782,26 @@ void prepareAndDoActivationAndBatchNormDeriv(Train_ResNet * trainer, BatchNorm *
 
 	cudnnDeriveBNTensorDescriptor(bn_descriptor, layer_descriptor, bn_mode);
 
+	float *input_nchw, *input_deriv_nchw, * out_layer_deriv_nchw;
+	cudaMalloc(&input_nchw, spatial_dim * spatial_dim * filters * batch_size * sizeof(float));
+	cudaMalloc(&input_deriv_nchw, spatial_dim * spatial_dim * filters * batch_size * sizeof(float));
+	cudaMalloc(&out_layer_deriv_nchw, spatial_dim * spatial_dim * filters * batch_size * sizeof(float));
+
+	cudnnTransformTensor(trainer -> cudnnHandle, &alpha_data, layer_descriptor, input, &beta_data, layer_descriptor_nchw, input_nchw);
+	cudnnTransformTensor(trainer -> cudnnHandle, &alpha_data, layer_descriptor, out_layer_deriv, &beta_data, layer_descriptor_nchw, out_layer_deriv_nchw);
 
 	cudnnBatchNormalizationBackward(trainer -> cudnnHandle, bn_mode, &alpha_data, &beta_data, &alpha_param, &beta_param, 
-											layer_descriptor, input, layer_descriptor, out_layer_deriv, layer_descriptor, input_deriv,
+											layer_descriptor_nchw, input_nchw, layer_descriptor_nchw, out_layer_deriv_nchw, layer_descriptor_nchw, input_deriv_nchw,
 											bn_descriptor, gamma, gamma_deriv, beta_deriv, eps, means, inv_vars);
 
+	cudnnTransformTensor(trainer -> cudnnHandle, &alpha_data, layer_descriptor_nchw, input_deriv_nchw, &beta_data, layer_descriptor, input_deriv);
+
+	cudaFree(input_nchw);
+	cudaFree(out_layer_deriv_nchw);
+	cudaFree(input_deriv_nchw);
+
 	cudnnDestroyTensorDescriptor(layer_descriptor);
+	cudnnDestroyTensorDescriptor(layer_descriptor_nchw);
 	cudnnDestroyTensorDescriptor(bn_descriptor);
 }
 
@@ -3309,7 +3350,7 @@ void update_parameters(Train_ResNet * trainer){
 
 	if (cur_dump_id % 1000 == 0){
 		printf("DUMPING TRAINER @ ID: %d!\n\n", cur_dump_id);
-		dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
+		//dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
 	}
 	
 	for (int i = n_locations - 1; i >= 0; i--){
@@ -3639,7 +3680,7 @@ int main(int argc, char *argv[]) {
 	// given when we generated shards...
 	int SHARD_N_IMAGES = 32768;
 
-	int BATCH_SIZE = 192;
+	int BATCH_SIZE = 128;
 	// dimensions of INPUT_DIM X INPUT_DIM x 3 color channels
 	int IMAGE_SIZE = INPUT_DIM * INPUT_DIM * 3;
 	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE, INPUT_DIM, SHARD_N_IMAGES);
@@ -3701,6 +3742,10 @@ int main(int argc, char *argv[]) {
 		epoch_loss = 0;
 		epoch_n_wrong = 0;
 		for (int iter = cur_iter_in_epoch; iter < iterations_per_epoch; iter++){
+
+			if (iter == 50){
+				exit(0);
+			}
 
 			//printf("************\n");
 
