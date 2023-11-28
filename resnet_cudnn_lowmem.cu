@@ -3760,6 +3760,7 @@ int main(int argc, char *argv[]) {
 				}
 				fprintf(loss_file, "%.4f\n", avg_batch_loss);
 				fflush(loss_file);
+				fflush(stdout);
 			}
 
 
@@ -3788,6 +3789,7 @@ int main(int argc, char *argv[]) {
 		(trainer -> accuracy_per_epoch)[epoch] = epoch_accuracy;
 		printf("\nEpoch %d, Total Loss: %f\n", epoch, epoch_loss);
 		printf("Epoch %d, Total Accuracy: %f\n\n", epoch, epoch_accuracy);
+		fflush(stdout);
 
 		// reset batch to start from beginning of dataset
 		trainer -> cur_batch -> cur_shard_id = -1;
