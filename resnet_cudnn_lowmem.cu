@@ -3350,7 +3350,7 @@ void update_parameters(Train_ResNet * trainer){
 
 	if (cur_dump_id % 1000 == 0){
 		printf("DUMPING TRAINER @ ID: %d!\n\n", cur_dump_id);
-		//dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
+		dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
 	}
 	
 	for (int i = n_locations - 1; i >= 0; i--){
@@ -3742,10 +3742,6 @@ int main(int argc, char *argv[]) {
 		epoch_loss = 0;
 		epoch_n_wrong = 0;
 		for (int iter = cur_iter_in_epoch; iter < iterations_per_epoch; iter++){
-
-			if (iter == 50){
-				exit(0);
-			}
 
 			//printf("************\n");
 
