@@ -1290,6 +1290,11 @@ void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Bat
 
 	int start_img_num = cur_batch_in_shard * batch_size;
 
+	// skip some images if shard_n_images not divisible by batch size
+	if (start_img_num + batch_size > shard_n_images){
+		start_img_num = shard_n_images;
+	}
+
 	int n_read;
 	int print_ret;
 
@@ -3680,7 +3685,7 @@ int main(int argc, char *argv[]) {
 	// given when we generated shards...
 	int SHARD_N_IMAGES = 32768;
 
-	int BATCH_SIZE = 128;
+	int BATCH_SIZE = 192;
 	// dimensions of INPUT_DIM X INPUT_DIM x 3 color channels
 	int IMAGE_SIZE = INPUT_DIM * INPUT_DIM * 3;
 	Batch * batch = init_general_batch(BATCH_SIZE, IMAGE_SIZE, INPUT_DIM, SHARD_N_IMAGES);
