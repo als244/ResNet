@@ -127,29 +127,39 @@ void build_shard(int shard_id, long image_dim_in, long image_dim_out, long chann
 		}
 		
 	}
+	free(image_bytes);
 
-
+	float * image_floats_nchw = (float *) malloc(true_total_pixels * sizeof(float));
+	size_t new_ind, old_ind;
+	for (int n = 0; n < img_cnt ; n++){
+		for (int c = 0; c < channels; c++){
+			for (int h = 0; h < image_dim_out; h++){
+				for (int w = 0; w < image_dim_out ; w++){
+					old_ind = n * image_dim_out * image_dim_out * channels + h * image_dim_out * channels + w * channels + c;
+					new_ind = n * image_dim_out * image_dim_out * channels + c * image_dim_out * image_dim_out + h * image_dim_out + w;
+					image_floats_nchw[new_ind] = image_floats[old_ind];
+				}
+			}
+		}
+	}
+	free(image_floats);
 
 	// write out images_float_cpu and correct_classes_cpu to new shard files
 	printf("Writing Image Floats & Labels to Shard Files...\n\n");
-	char shard_images_filepath[68];
-	char shard_labels_filepath[68];
-	sprintf(shard_images_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.images", shard_id);
-	shard_images_filepath[67] = '\0';
-	
+	char * shard_images_filepath, * shard_labels_filepath;
+	asprintf(&shard_images_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/nchw/%03d.images", shard_id);
 	FILE * shard_images_file = fopen(shard_images_filepath, "wb");
-	fwrite(image_floats, sizeof(float), true_total_pixels, shard_images_file);
+	free(shard_images_filepath);
+	fwrite(image_floats_nchw, sizeof(float), true_total_pixels, shard_images_file);
 	fclose(shard_images_file);
-
-	sprintf(shard_labels_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.labels", shard_id);
-	shard_labels_filepath[67] = '\0';
-
+	
+	asprintf(&shard_labels_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/nchw/%03d.labels", shard_id);
 	FILE * shard_labels_file = fopen(shard_labels_filepath, "wb");
+	free(shard_labels_filepath);
 	fwrite(classes, sizeof(int), img_cnt, shard_labels_file);
 	fclose(shard_labels_file);
-
-	free(image_bytes);
-	free(image_floats);
+	
+	free(image_floats_nchw);
 	free(classes);
 	free(img_nums);
 	free(row_offs);
