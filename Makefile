@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -g3 -std=c99 -pedantic -Wall
 
-all: ResNetFast ResNetFastOpt ResNetCuDNNLowMem ResNetCuDNNLowMemOpt ResNet ResNetOpt ResNetCuDNN ResNetCuDNNOpt 
+all: BuildShards ResNetFast ResNetFastOpt ResNetCuDNNLowMem ResNetCuDNNLowMemOpt ResNet ResNetOpt ResNetCuDNN ResNetCuDNNOpt 
 
 ResNet: resnet.cu
 	nvcc -g -G -arch=sm_80 resnet.cu -lcurand -o ResNet
@@ -22,10 +22,10 @@ ResNetCuDNNLowMemOpt: resnet_cudnn_lowmem.cu
 	nvcc -O3 -arch=sm_80 resnet_cudnn_lowmem.cu -lcurand -lcudnn -o ResNetCuDNNLowMemOpt
 
 ResNetFast: resnet_cudnn_fast.cu
-	nvcc -g -G -arch=sm_80 resnet_cudnn_fast.cu -lcurand -lcudnn -lcublas -o ResNetFast
+	nvcc -g -G -arch=sm_80 resnet_cudnn_fast.cu --use_fast_math -lcurand -lcudnn -o ResNetFast
 
 ResNetFastOpt: resnet_cudnn_fast.cu
-	nvcc -O3 -arch=sm_80 resnet_cudnn_fast.cu -lcurand -lcudnn -lcublas -o ResNetFastOpt
+	nvcc -O3 -arch=sm_80 resnet_cudnn_fast.cu --use_fast_math -lcurand -lcudnn -o  ResNetFastOpt
 
 BuildShards: build_training_shards.c
 	${CC} ${CFLAGS} -o $@ $^

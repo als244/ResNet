@@ -4,7 +4,6 @@
 #include <math.h>
 #include <cuda.h>
 #include <curand.h>
-#include <cublas.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 
@@ -295,14 +294,6 @@ __global__ void updateMeans(int size, const float * gradients, const float * mod
 	if (i >= size){
 		return;
 	}
-	if (isnan(gradients[i])){
-		printf("ERROR in Update Means for Parameter at location: %d\nGradient is NAN at index: %d...keeping same running mean\n\n", loc_ind, i);
-		return;
-	}
-	if (isinf(gradients[i])){
-		printf("ERROR in Update Means for Parameter at location: %d\nGradient is INF at index: %d...keeping same running mean\n\n", loc_ind, i);
-		return;
-	}
 	float grad_with_decay = gradients[i] + weight_decay * model_params[i];
 	prev_means[i] = base_mean_decay * prev_means[i] + (1 - base_mean_decay) * grad_with_decay;
 	
@@ -312,14 +303,6 @@ __global__ void updateMeans(int size, const float * gradients, const float * mod
 __global__ void updateVars(int size, const float * gradients, const float * model_params, float base_var_decay, float weight_decay, float * prev_vars, int loc_ind){
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 	if (i >= size){
-		return;
-	}
-	if (isnan(gradients[i])){
-		printf("ERROR in Update Vars for Parameter at location: %d\nGradient is NAN at index: %d...keeping same running var\n", loc_ind, i);
-		return;
-	}
-	if (isinf(gradients[i])){
-		printf("ERROR in Update Vars for Parameter at location: %d\nGradient is INF at index: %d...keeping same running var\n", loc_ind, i);
 		return;
 	}
 	float grad_with_decay = gradients[i] + weight_decay * model_params[i];
@@ -336,17 +319,6 @@ __global__ void updateParams(int size, float * model_params, const float * means
 	float var_adj = vars[i] / (1 - cur_var_decay);
 	float old_model_param = model_params[i];
 	model_params[i] = model_params[i] - (learning_rate * (mean_adj / (sqrtf(var_adj) + eps)) + weight_decay * old_model_param);
-	if (isnan(model_params[i])){
-		printf("ERROR: for Parameter at location: %d\nto NAN at index: %d...resetting to prev value of %f\n", loc_ind, i, old_model_param);
-		model_params[i] = old_model_param;
-		printf("Var: %f, Var Decay: %f, Var Adj: %f, Sqrt of Var Adj: %f\n\n", vars[i], cur_var_decay, var_adj, sqrtf(var_adj));
-		return;
-	}
-	if (isinf(model_params[i])){
-		printf("ERROR: for Parameter at location: %d\nto INF at index: %d...resetting to prev value of %f\n", loc_ind, i, old_model_param);
-		model_params[i] = old_model_param;
-		return;
-	}
 }
 
 /* INITIALIZE CORE MODEL STRUCTURES */
@@ -949,21 +921,6 @@ Batch * init_general_batch(int n_images, int image_size, int image_dim, int shar
 	return batch;
 }
 
-void convert_to_nchw_cpu(float * input_nhwc, int image_dim, int batch_size, int filters, float * output_nchw){
-	size_t new_ind, old_ind;
-	for (int n = 0; n < batch_size ; n++){
-		for (int c = 0; c < filters; c++){
-			for (int h = 0; h < image_dim; h++){
-				for (int w = 0; w < image_dim ; w++){
-					old_ind = n * image_dim * image_dim * filters + h * image_dim * filters + w * filters + filters;
-					new_ind = n * image_dim * image_dim * filters + c * image_dim * image_dim + h * image_dim + w;
-					output_nchw[new_ind] = input_nhwc[old_ind];
-				}
-			}
-		}
-	}
-}
-
 // (if this takes too long, can do it in parallel with separate process on cpu)
 // ASSUMING shard_n_images % batch_size = 0
 void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Batch * batch_buffer){
@@ -1015,13 +972,13 @@ void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Bat
 		}
 
 		// load new shard into RAM
-		print_ret = asprintf(&shard_images_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.images", cur_shard_id);
+		print_ret = asprintf(&shard_images_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/nchw/%03d.images", cur_shard_id);
 		FILE * shard_images_file = fopen(shard_images_filepath, "rb");
 		n_read = fread(full_shard_images, sizeof(float), ((size_t) shard_n_images) * ((size_t) image_size), shard_images_file);
 		fclose(shard_images_file);
 		free(shard_images_filepath);
 
-		print_ret = asprintf(&shard_labels_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/%03d.labels", cur_shard_id);
+		print_ret = asprintf(&shard_labels_filepath, "/mnt/storage/data/vision/imagenet/2012/train_data_shards/nchw/%03d.labels", cur_shard_id);
 		FILE * shard_labels_file = fopen(shard_labels_filepath, "rb");
 		n_read = fread(full_shard_correct_classes, sizeof(int), shard_n_images, shard_labels_file);
 		fclose(shard_labels_file);
@@ -1038,14 +995,7 @@ void load_new_batch(Train_ResNet * trainer, Class_Metadata * class_metadata, Bat
 	}
 
 	// load current batch
-
-	float * nhwc_images_float_cpu = (float *) malloc(total_pixels * sizeof(float));
-
-	memcpy(nhwc_images_float_cpu, full_shard_images + cur_batch_in_shard * total_pixels, total_pixels * sizeof(float));
-	convert_to_nchw_cpu(nhwc_images_float_cpu, image_dim, batch_size, 3, images_float_cpu);
-
-	free(nhwc_images_float_cpu);
-
+	memcpy(images_float_cpu, full_shard_images + cur_batch_in_shard * total_pixels, total_pixels * sizeof(float));
 	memcpy(correct_classes_cpu, full_shard_correct_classes + cur_batch_in_shard * batch_size, batch_size * sizeof(int));
 	
 
@@ -1132,6 +1082,53 @@ Class_Metadata * populate_class_info(char * label_filename, char * synset_filena
 }
 
 /* PREP AND LAUNCHING CUDA KERNELS! */
+
+// assume NCHW packed with each tensor having size
+void prepareAndDoTensorOp(Train_ResNet * trainer, char * op_type, size_t size, int spatial_dim, int filters, int batch_size, float * A, float * B, float * C){
+	cudnnStatus_t status;
+
+	cudnnTensorDescriptor_t tensor_descriptor;
+	status = cudnnCreateTensorDescriptor(&tensor_descriptor);
+	status = cudnnSetTensor4dDescriptor(tensor_descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, batch_size, filters, spatial_dim, spatial_dim);
+
+	cudnnOpTensorDescriptor_t op_descriptor;
+	cudnnCreateOpTensorDescriptor(&op_descriptor);
+
+	float alpha1 = 1, alpha2 = 1, beta = 0; 
+	if (strcmp(op_type, "ADD")){
+		cudnnSetOpTensorDescriptor(op_descriptor, CUDNN_OP_TENSOR_ADD, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
+	}
+	else if (strcmp(op_type, "SUB")){
+		cudnnSetOpTensorDescriptor(op_descriptor, CUDNN_OP_TENSOR_ADD, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
+		alpha2 = -1;
+	}
+	else if (strcmp(op_type, "MUL")){
+		cudnnSetOpTensorDescriptor(op_descriptor, CUDNN_OP_TENSOR_MUL, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
+	}
+	else if (strcmp(op_type, "MIN")){
+		cudnnSetOpTensorDescriptor(op_descriptor, CUDNN_OP_TENSOR_MIN, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
+	}
+	else if (strcmp(op_type, "MAX")){
+		cudnnSetOpTensorDescriptor(op_descriptor, CUDNN_OP_TENSOR_MAX, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
+	}
+	else if (strcmp(op_type, "SQRT")){
+		cudnnSetOpTensorDescriptor(op_descriptor, CUDNN_OP_TENSOR_SQRT, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
+	}
+	else{
+
+		// ERROR!
+	}
+
+	status = cudnnOpTensor(trainer -> cudnnHandle, op_descriptor, &alpha1, tensor_descriptor, A, &alpha2, tensor_descriptor, B, &beta, tensor_descriptor, C);
+
+	cudnnDestroyTensorDescriptor(tensor_descriptor);
+	cudnnDestroyOpTensorDescriptor(op_descriptor);
+	
+
+
+}
+
+
 
 void prepareAndDoActivation(Train_ResNet * trainer, size_t size, float * input, int spatial_dim, int filters, int batch_size, float *output){
 	cudnnStatus_t status;
@@ -1271,6 +1268,10 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 	status = cudnnSetTensor4dDescriptor(output_descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, batch_size, out_filters, out_spatial_dim, out_spatial_dim);
 	cudnnSetConvolutionMathType(convolution_descriptor, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION);
 
+	float total_time;
+	float min_time = 1000000;
+	int min_algo = 0;
+
 	if (*algo == -1){
 
 		int max_count, returned_cnt;
@@ -1280,17 +1281,25 @@ void prepareAndDoConvolution(Train_ResNet * trainer, int in_spatial_dim, int ker
 
 		cudnnConvolutionFwdAlgoPerf_t * perfResults = (cudnnConvolutionFwdAlgoPerf_t *) malloc(max_count * sizeof(cudnnConvolutionFwdAlgoPerf_t));
 		cudnnFindConvolutionForwardAlgorithm(trainer -> cudnnHandle, input_descriptor, kernel_descriptor, convolution_descriptor, output_descriptor, max_count, &returned_cnt, perfResults);
-		// cudnnConvolutionFwdAlgoPerf_t cur_perf_results;
-		// FILE * fp_perf = fopen("kernel_perfs/forward_conv.text", "a");
-		// fprintf(fp_perf, "\nConvolution Arguments: %d,%d,%d,%d,%d,%d\n", in_spatial_dim, kern_dim, stride, in_filters, out_filters, batch_size);
-		// for (int i = 0; i < returned_cnt; i++){
-		// 	cur_perf_results = perfResults[i];
-		// 	fprintf(fp_perf, "%d,%f,%zu,%d\n", cur_perf_results.algo, cur_perf_results.time, cur_perf_results.memory, cur_perf_results.mathType);
-		// }
-		// fclose(fp_perf);
+		cudnnConvolutionFwdAlgoPerf_t cur_perf_results;
+		//FILE * fp_perf = fopen("kernel_perfs/forward_conv.text", "a");
+		//fprintf(fp_perf, "\nConvolution Arguments: %d,%d,%d,%d,%d,%d\n", in_spatial_dim, kern_dim, stride, in_filters, out_filters, batch_size);
+		for (int i = 0; i < returned_cnt; i++){
+			cur_perf_results = perfResults[i];
+			//fprintf(fp_perf, "%d,%f,%zu,%d\n", cur_perf_results.algo, cur_perf_results.time, cur_perf_results.memory, cur_perf_results.mathType);
+			if (cur_perf_results.time > 0){
+					// measured bandthwidth ratio of cudaMalloc as MiB / 34 = ms delay
+					total_time = cur_perf_results.time + ((float) cur_perf_results.memory / 1e6) / 34;
+					if (total_time < min_time){
+						min_time = total_time;
+						min_algo = cur_perf_results.algo;
+					}
+			}
+		}
+		//fclose(fp_perf);
 		//free(perfResults);
 
-		*algo = perfResults[0].algo;
+		*algo = min_algo;
 		free(perfResults);
 	
 		// const algo_t algos[] = {
@@ -1359,6 +1368,10 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 
 	size_t workspace_bytes = 0;
 
+	float total_time;
+	float min_time = 1000000;
+	int min_algo = 0;
+
 	// Compute deriv w.r.t input data
 	if (toComputeInputDeriv){
 
@@ -1379,15 +1392,24 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 			status = cudnnGetConvolutionBackwardDataAlgorithmMaxCount(trainer -> cudnnHandle, &max_count_data);
 			cudnnConvolutionBwdDataAlgoPerf_t * perfResultsData = (cudnnConvolutionBwdDataAlgoPerf_t *) malloc(max_count_data * sizeof(cudnnConvolutionBwdDataAlgoPerf_t));
 			cudnnFindConvolutionBackwardDataAlgorithm(trainer -> cudnnHandle, kernel_descriptor, output_descriptor, convolution_descriptor, input_descriptor, max_count_data, &returned_cnt, perfResultsData);
-			// cudnnConvolutionBwdDataAlgoPerf_t cur_perf_results;
-			// FILE * fp_perf_data = fopen("kernel_perfs/backward_data_conv.text", "a");
-			// fprintf(fp_perf_data, "\nConvolution Arguments: %d,%d,%d,%d,%d,%d\n", in_spatial_dim, kern_dim, stride, in_filters, out_filters, batch_size);
-			// for (int i = 0; i < returned_cnt; i++){
-			// 	cur_perf_results = perfResultsData[i];
-			// 	fprintf(fp_perf_data, "%d,%f,%zu,%d\n", cur_perf_results.algo, cur_perf_results.time, cur_perf_results.memory, cur_perf_results.mathType);
-			// }
-			// fclose(fp_perf_data);
-			// free(perfResultsData);
+			cudnnConvolutionBwdDataAlgoPerf_t cur_perf_results;
+			//FILE * fp_perf_data = fopen("kernel_perfs/backward_data_conv.text", "a");
+			//fprintf(fp_perf_data, "\nConvolution Arguments: %d,%d,%d,%d,%d,%d\n", in_spatial_dim, kern_dim, stride, in_filters, out_filters, batch_size);
+			for (int i = 0; i < returned_cnt; i++){
+				cur_perf_results = perfResultsData[i];
+				if (cur_perf_results.time > 0){
+					// measured bandthwidth ratio of cudaMalloc as MiB / 34 = ms delay
+					total_time = cur_perf_results.time + ((float) cur_perf_results.memory / 1e6) / 34;
+					if (total_time < min_time){
+						min_time = total_time;
+						min_algo = cur_perf_results.algo;
+					}
+				}
+				
+				//fprintf(fp_perf_data, "%d,%f,%zu,%d\n", cur_perf_results.algo, cur_perf_results.time, cur_perf_results.memory, cur_perf_results.mathType);
+			}
+			//fclose(fp_perf_data);
+			//free(perfResultsData);
 
 
 			*dataAlgo = perfResultsData[0].algo;
@@ -1427,20 +1449,29 @@ void prepreAndDoConvolutionDeriv(Train_ResNet * trainer, int in_spatial_dim, int
 	//cudnnConvolutionBwdFilterAlgoPerf_t top_filter_algo[1];
 	//cudnnGetConvolutionBackwardFilterAlgorithm_v7(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, 1, &returned_cnt, top_filter_algo);
 	if (*filtAlgo == -1){
+		min_time = 1000000;
 		int max_count_filt;
 		status = cudnnGetConvolutionBackwardFilterAlgorithmMaxCount(trainer -> cudnnHandle, &max_count_filt);
 		cudnnConvolutionBwdFilterAlgoPerf_t * perfResultsFilt = (cudnnConvolutionBwdFilterAlgoPerf_t *) malloc(max_count_filt * sizeof(cudnnConvolutionBwdFilterAlgoPerf_t));
 		cudnnFindConvolutionBackwardFilterAlgorithm(trainer -> cudnnHandle, input_descriptor, output_descriptor, convolution_descriptor, kernel_descriptor, max_count_filt, &returned_cnt, perfResultsFilt);
-		// cudnnConvolutionBwdFilterAlgoPerf_t cur_perf_results;
-		// FILE * fp_perf_filt = fopen("kernel_perfs/backward_filter_conv.text", "a");
-		// fprintf(fp_perf_filt, "\nConvolution Arguments: %d,%d,%d,%d,%d,%d\n", in_spatial_dim, kern_dim, stride, in_filters, out_filters, batch_size);
-		// for (int i = 0; i < returned_cnt; i++){
-		// 	cur_perf_results = perfResultsFilt[i];
-		// 	fprintf(fp_perf_filt, "%d,%f,%zu,%d\n", cur_perf_results.algo, cur_perf_results.time, cur_perf_results.memory, cur_perf_results.mathType);
-		// }
-		// fclose(fp_perf_filt);
-		// free(perfResultsFilt);
-		*filtAlgo = perfResultsFilt[0].algo;
+		cudnnConvolutionBwdFilterAlgoPerf_t cur_perf_results;
+		//FILE * fp_perf_filt = fopen("kernel_perfs/backward_filter_conv.text", "a");
+		//fprintf(fp_perf_filt, "\nConvolution Arguments: %d,%d,%d,%d,%d,%d\n", in_spatial_dim, kern_dim, stride, in_filters, out_filters, batch_size);
+		for (int i = 0; i < returned_cnt; i++){
+			cur_perf_results = perfResultsFilt[i];
+			//fprintf(fp_perf_filt, "%d,%f,%zu,%d\n", cur_perf_results.algo, cur_perf_results.time, cur_perf_results.memory, cur_perf_results.mathType);
+			if (cur_perf_results.time > 0){
+				// measured bandthwidth ratio of cudaMalloc as MiB / 34 = ms delay
+				total_time = cur_perf_results.time + ((float) cur_perf_results.memory / 1e6) / 34;
+				if (total_time < min_time){
+					min_time = total_time;
+					min_algo = cur_perf_results.algo;
+				}
+			}
+		}
+		//fclose(fp_perf_filt);
+		//free(perfResultsFilt);
+		*filtAlgo = min_algo;
 		free(perfResultsFilt);
 	}
 
@@ -1819,7 +1850,8 @@ void forward_pass(Train_ResNet * trainer){
 		conv_block_output = cur_conv_block_activation -> output;
 		// add identity residual connection (or projected residual connection) to the prior batch norm output
 		//addVec <<< gridDimConvOutput, blockDimConvOutput >>> (total_size_conv_block_output, norm_output, post_projection_norm_vals, conv_block_output);
-		cublasSaxpy(total_size_conv_block_output, 1.0, post_projection_norm_vals, 1, conv_block_output, 1);
+		//cublasSaxpy(total_size_conv_block_output, 1.0, post_projection_norm_vals, 1, conv_block_output, 1);
+		prepareAndDoTensorOp(trainer, "ADD", total_size_conv_block_output, out_spatial_dim, out_filters, batch_size, conv_block_output, post_projection_norm_vals, conv_block_output);
 
 		// activated output from previous block not needed anymore
 		if (i != 0) {
@@ -1914,10 +1946,10 @@ void backwards_pass(Train_ResNet * trainer){
 	float * prev_conv_block_out_deriv;
 	cudaMalloc(&prev_conv_block_out_deriv, max_activation_size * sizeof(float));
 
-	cudaMemset(activ_deriv_buff, 0, max_activation_size * sizeof(float));
-	cudaMemset(prev_conv_block_out_deriv, 0, max_activation_size * sizeof(float));
-	cudaMemset(block_activ_deriv, 0, max_activation_size * sizeof(float));
-	cudaMemset(temp_deriv_buff, 0, max_activation_size * sizeof(float));
+	// cudaMemset(activ_deriv_buff, 0, max_activation_size * sizeof(float));
+	// cudaMemset(prev_conv_block_out_deriv, 0, max_activation_size * sizeof(float));
+	// cudaMemset(block_activ_deriv, 0, max_activation_size * sizeof(float));
+	// cudaMemset(temp_deriv_buff, 0, max_activation_size * sizeof(float));
 
 	int conv_algo_ind = 0;
 	int *data_algos = backprop_buffer -> data_algos;
@@ -2030,6 +2062,7 @@ void backwards_pass(Train_ResNet * trainer){
 	// STARTING POINT FROM BACKPROP COMING FROM UPSTREAM LAYERS IS AT LAST CONV BLOCK ACTIVATION -> OUTPUT_ACTIVATED
 	float *conv_block_input, *conv_block_input_deriv, * upstream_deriv, *block_activation_deriv, *final_output_pre_activ;
 	float *temp_conv_inp_activated;
+	float *temp_ptr;
 	size_t conv_input_size;
 
 	// extra temp variables
@@ -2058,7 +2091,7 @@ void backwards_pass(Train_ResNet * trainer){
 		in_filters = cur_conv_block_params -> incoming_filters;
 		conv_input_size = in_spatial_dim * in_spatial_dim * in_filters * batch_size;
 		cudaMalloc(&temp_conv_inp_activated, conv_input_size * sizeof(float));
-		cudaMemset(temp_conv_inp_activated, 0, conv_input_size * sizeof(float));
+		//cudaMemset(temp_conv_inp_activated, 0, conv_input_size * sizeof(float));
 		// repeat the activation because not stored
 
 		// dim3 gridDimReActiv(ceil((float) conv_input_size / MAX_THREAD_PER_BLOCK));
@@ -2121,7 +2154,11 @@ void backwards_pass(Train_ResNet * trainer){
 			prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, false);
 
-			cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+			temp_ptr = temp_deriv_buff;
+			temp_deriv_buff = activ_deriv_buff;
+			activ_deriv_buff = temp_ptr;
+
+			//cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
 
 			// CONVOLUTION DIMENSIONS
@@ -2174,6 +2211,7 @@ void backwards_pass(Train_ResNet * trainer){
 		
 
 		/* 3: Expanded Convolution And Batch Norm Derivs */
+		int exp_spatial_dim = cur_conv_block_params -> incoming_spatial_dim / cur_conv_block_params -> stride;
 
 		// update the current batch norm layer pointers
 		cur_batch_norm_params = cur_conv_block_params -> norm_expansion;
@@ -2194,16 +2232,18 @@ void backwards_pass(Train_ResNet * trainer){
 
 		float * temp_bn_activ;
 		cudaMalloc(&temp_bn_activ, cur_bn_inp_size * sizeof(float));
-		cudaMemcpy(temp_bn_activ, cur_conv_block_activation -> output, cur_bn_inp_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
 		if (cur_conv_block_params -> projection){
 			//subVec <<< ceil((float) cur_bn_inp_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (cur_bn_inp_size, cur_conv_block_activation -> output, cur_conv_block_activation -> post_projection_norm_vals, temp_bn_activ);
-			cublasSaxpy(cur_bn_inp_size, -1.0, cur_conv_block_activation -> post_projection_norm_vals, 1, temp_bn_activ, 1);
+			//cublasSaxpy(cur_bn_inp_size, -1.0, cur_conv_block_activation -> post_projection_norm_vals, 1, temp_bn_activ, 1);
+			prepareAndDoTensorOp(trainer, "SUB", cur_bn_inp_size, exp_spatial_dim, cur_bn_feature_size, batch_size, cur_conv_block_activation -> output, cur_conv_block_activation -> post_projection_norm_vals, temp_bn_activ);
 		}
 		else{
 			//subVec <<< ceil((float) cur_bn_inp_size / MAX_THREAD_PER_BLOCK), MAX_THREAD_PER_BLOCK >>> (cur_bn_inp_size, cur_conv_block_activation -> output, temp_conv_inp_activated, temp_bn_activ);
-			cublasSaxpy(cur_bn_inp_size, -1.0, temp_conv_inp_activated, 1, temp_bn_activ, 1);
+			//cublasSaxpy(cur_bn_inp_size, -1.0, temp_conv_inp_activated, 1, temp_bn_activ, 1);
+			prepareAndDoTensorOp(trainer, "SUB", cur_bn_inp_size, exp_spatial_dim, cur_bn_feature_size, batch_size, cur_conv_block_activation -> output, temp_conv_inp_activated, temp_bn_activ);
 		}
+
 		bn_activated = temp_bn_activ;
 		
 		prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs,
@@ -2211,7 +2251,12 @@ void backwards_pass(Train_ResNet * trainer){
 
 		cudaFree(temp_bn_activ);
 
-		cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+		temp_ptr = temp_deriv_buff;
+		temp_deriv_buff = activ_deriv_buff;
+		activ_deriv_buff = temp_ptr;
+
+		//cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+
 
 
 		printDeviceData("CONV BLOCK OUTPUT ACTIVATION & NORM DERIV", bn_input_deriv, print_size);
@@ -2239,7 +2284,11 @@ void backwards_pass(Train_ResNet * trainer){
 													conv_input_deriv, conv_weight_deriv, true, &data_algos[conv_algo_ind], &filt_algos[conv_algo_ind]);
 		conv_algo_ind++;
 
-		cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+		temp_ptr = temp_deriv_buff;
+		temp_deriv_buff = activ_deriv_buff;
+		activ_deriv_buff = temp_ptr;
+
+		//cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
 		
 		printDeviceData("EXPANDED CONV INPUT DERIV", conv_input_deriv, print_size);
 		printDeviceData("EXPANDED CONV WEIGHT DERIV", conv_weight_deriv, print_size);
@@ -2265,7 +2314,10 @@ void backwards_pass(Train_ResNet * trainer){
 		prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
 
-		cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+		temp_ptr = temp_deriv_buff;
+		temp_deriv_buff = activ_deriv_buff;
+		activ_deriv_buff = temp_ptr;
+		//cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
 		printDeviceData("SPATIAL ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
@@ -2294,7 +2346,11 @@ void backwards_pass(Train_ResNet * trainer){
 													conv_input_deriv, conv_weight_deriv, true, &data_algos[conv_algo_ind], &filt_algos[conv_algo_ind]);
 		conv_algo_ind++;
 
-		cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+		temp_ptr = temp_deriv_buff;
+		temp_deriv_buff = activ_deriv_buff;
+		activ_deriv_buff = temp_ptr;
+
+		//cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
 		printDeviceData("SPATIAL CONV INPUT DERIV", conv_input_deriv, print_size);
 		printDeviceData("SPATIAL CONV WEIGHT DERIV", conv_weight_deriv, print_size);
@@ -2319,7 +2375,11 @@ void backwards_pass(Train_ResNet * trainer){
 		prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
 
-		cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+		temp_ptr = temp_deriv_buff;
+		temp_deriv_buff = activ_deriv_buff;
+		activ_deriv_buff = temp_ptr;
+
+		//cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
 		printDeviceData("REDUCED ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
@@ -2356,8 +2416,8 @@ void backwards_pass(Train_ResNet * trainer){
 		cudaMemcpy(activ_deriv_buff, prev_conv_block_out_deriv, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
 		cudaMemset(prev_conv_block_out_deriv, 0, max_activation_size * sizeof(float));
-		cudaMemset(block_activ_deriv, 0, max_activation_size * sizeof(float));
-		cudaMemset(temp_deriv_buff, 0, max_activation_size * sizeof(float));
+		//cudaMemset(block_activ_deriv, 0, max_activation_size * sizeof(float));
+		//cudaMemset(temp_deriv_buff, 0, max_activation_size * sizeof(float));
 		cudaFree(temp_conv_inp_activated);
 	}
 
@@ -2385,7 +2445,11 @@ void backwards_pass(Train_ResNet * trainer){
 
 	prepareAndDoMaxPoolDeriv(trainer, max_pool_inp, max_pool_out, maxpool_out_deriv, maxpool_in_spatial_dim, maxpool_filters, maxpool_kern_dim, maxpool_stride, batch_size, maxpool_inp_deriv);
 
-	cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+	temp_ptr = temp_deriv_buff;
+	temp_deriv_buff = activ_deriv_buff;
+	activ_deriv_buff = temp_ptr;
+
+	//cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
 	printDeviceData("MAX POOL INPUT ACTIVATION DERIV", maxpool_inp_deriv, print_size);
 
@@ -2410,8 +2474,11 @@ void backwards_pass(Train_ResNet * trainer){
 		
 	prepareAndDoActivationAndBatchNormDeriv(trainer, cur_batch_norm_params, cur_batch_norm_cache, cur_batch_norm_param_derivs,
 																						batch_size, eps, bn_input, bn_activated, bn_out_layer_deriv, bn_input_deriv, true);
+	temp_ptr = temp_deriv_buff;
+	temp_deriv_buff = activ_deriv_buff;
+	activ_deriv_buff = temp_ptr;
 
-	cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
+	//cudaMemcpy(activ_deriv_buff, temp_deriv_buff, max_activation_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
 	printDeviceData("INIT CONV ACTIVATION & BATCH NORM DERIV", bn_input_deriv, print_size);
 
@@ -3118,7 +3185,7 @@ void update_parameters(Train_ResNet * trainer){
 
 	if (cur_dump_id % 1000 == 0){
 		printf("DUMPING TRAINER @ ID: %d!\n\n", cur_dump_id);
-		dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
+		//dump_trainer(cur_dump_id, trainer, trainer -> dump_dir);
 	}
 	
 	for (int i = n_locations - 1; i >= 0; i--){
@@ -3128,7 +3195,7 @@ void update_parameters(Train_ResNet * trainer){
 		mean_location = prev_grad_means_locations[i];
 		var_location = prev_grad_vars_locations[i];
 
-		check_errors(trainer, param_size, model_location, grad_location, mean_location, var_location, i);
+		//check_errors(trainer, param_size, model_location, grad_location, mean_location, var_location, i);
 
 		dim3 gridDimUpdate(ceil((float) param_size / MAX_THREAD_PER_BLOCK));
 		dim3 blockDimUpdate(MAX_THREAD_PER_BLOCK);
@@ -3150,8 +3217,8 @@ void update_parameters(Train_ResNet * trainer){
 	}
 
 	// reset images and classes before next cudaMemcpy
-	cudaMemset(trainer -> cur_batch -> images, 0, batch_size * image_size * sizeof(float));
-	cudaMemset(trainer -> cur_batch -> correct_classes, 0, batch_size * sizeof(int));
+	//cudaMemset(trainer -> cur_batch -> images, 0, batch_size * image_size * sizeof(float));
+	//cudaMemset(trainer -> cur_batch -> correct_classes, 0, batch_size * sizeof(int));
 
 	// change the current mean and var decay...
 	trainer -> cur_mean_decay = cur_mean_decay;
@@ -3227,7 +3294,7 @@ int main(int argc, char *argv[]) {
 	cudnnStatus_t cudnn_status = cudnnCreate(&cudnn);
 	//printf("Create Status: %s\n\n", cudnnGetErrorString(cudnn_status));
 
-	const char * MY_DUMP_DIR = "cudnn_nchw_test";
+	const char * MY_DUMP_DIR = "cudnn_fast";
 
 	Train_ResNet * trainer = init_trainer(model, batch, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY, MEAN_DECAY, VAR_DECAY, EPS, N_EPOCHS, &cudnn, MY_DUMP_DIR);
 
@@ -3270,10 +3337,10 @@ int main(int argc, char *argv[]) {
 		epoch_n_wrong = 0;
 		for (int iter = cur_iter_in_epoch; iter < iterations_per_epoch; iter++){
 
+			// if (iter == 50){
+			// 	exit(0);
+			// }
 			//printf("************\n");
-			if (iter == 50){
-				exit(0);
-			}
 
 			/* LOAD NEW BATCH */
 			//printf("Loading Batch...: %d\n", iter);
